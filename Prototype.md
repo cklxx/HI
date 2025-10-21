@@ -1,67 +1,58 @@
-# HI-Telos OS — Prototype（极简只读 Web）
-**范围**：仅用于**查看**历史消息、Markdown 文件与 LLM 日志；无视觉设计。
+# HI-Telos OS — Prototype 指南（ReAct MVP）
 
-## 1. 导航
-- `/ui`：文本入口
-- `/ui/messages`：表格化列出消息（时间/来源/方向/摘要/状态）
-- `/ui/md`：左侧目录树 + 右侧 Markdown 渲染（可切换“原文”）
-- `/ui/logs`：LLM 日志（过滤 + SSE 实时）
-- `/ui/sp`：文本 KPI（I→T/OIR/BCR/EVI）+ Most-Recent + Top-Used
+MVP 仍以后端链路为主，无前端页面，仅通过 REST + 文件观察即可验证心跳与 Agent 行为。
 
-## 2. 线框（ASCII）
-```
-/ui/messages
-+--------------------------------------------------------------+
-| time            | src     | dir | summary              | ... |
-| 2025-10-19 12:..| telegram| in  | "周三演示..."        |     |
-| ...                                                      ... |
-+--------------------------------------------------------------+
+## 1. REST 示例
+```bash
+# 创建 Intent，并触发内部 Beat
+curl -X POST http://localhost:8080/api/intents \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "source": "cli",
+        "summary": "整理 inbox",
+        "telos_alignment": 0.8,
+        "body": "- 检查任务\n- 更新状态"
+      }'
 
-/ui/md
-+-----------+-----------------------------------------------+
-| tree      | # 2025-10-19 — Beat v3                        |
-| /mission  | ## Sense / Reflect / Decide / Act / Log       |
-| /journals | ...                                           |
-| /evidence |                                               |
-+-----------+-----------------------------------------------+
+# 查看 SP 指标（含最终答案）
+curl http://localhost:8080/api/sp
 
-/ui/logs
-[filters: level model run_id since] [Follow ✓]
-2025-10-19T01:23:45Z DEBUG llm.router request.sent run=r-001 model=local:small
-2025-10-19T01:23:46Z INFO  llm.router fallback       run=r-001 -> openai:gpt-reason
-...
+# 浏览 Markdown 树与具体内容（可选渲染 HTML）
+curl http://localhost:8080/api/md/tree
+curl "http://localhost:8080/api/md/file?path=journals/2025/01/01.md"
+curl "http://localhost:8080/api/md/file?path=journals/2025/01/01.md&render=true"
+
+# 查看最近的 LLM 调用日志（可按 level/model/run_id/since 过滤）
+curl "http://localhost:8080/api/logs/llm?limit=5"
 ```
 
-## 3. 接口绑定
-- `/api/messages` → `/ui/messages`
-- `/api/md/tree` + `/api/md/file` → `/ui/md`
-- `/api/logs/llm` + `/api/logs/llm/stream` → `/ui/logs`
-- `/api/sp` → `/ui/sp`
-
-## 4. 系统 Prompt 模版（内置约束）
-```text
-You are HI-Telos, an always-on, beat-driven agent.
-Goals: Align Human Intent → Telos. All actions are logged to Markdown.
-
-At start of every response:
-1) Show Top-Used entities/diaries in the last 7 days (by frequency).
-2) Show Most-Recent N records (by recency).
-Only these two are shown by default. Everything else must be explicitly fetched via search/retrieval.
-
-Constraints:
-- Never rely on KV cache. Build context from the freshest and most-referenced thoughts/actions/dialogues.
-- Prefer evidence-anchored citations (journal/evidence paths).
-- For deep/critical tasks, escalate to highest-model policy. For routine beats, use local model.
+创建成功返回：
+```json
+{
+  "id": "<uuid>",
+  "path": "data/intent/inbox/20240101T120000-<uuid>.md",
+  "beat_scheduled": true
+}
 ```
 
-## 5. 示例页面（最小 HTML 片段）
-```html
-<!doctype html><meta charset="utf-8">
-<h1>HI-Telos /ui/sp</h1>
-<pre id="sp"></pre>
-<script>
-fetch('/api/sp').then(r=>r.json()).then(j=>{
-  document.getElementById('sp').textContent = JSON.stringify(j,null,2);
-});
-</script>
-```
+## 2. 目录与内容预期
+触发一次心跳后，可在 `data/` 目录看到：
+- `intent/history/*.md`：被消费并归档的原始 Markdown。
+- `journals/YYYY/MM/DD.md`：包含 ReAct 轨迹与 `Final answer: <LLM 输出>`。
+- `sp/index.json`：Top-Used / Most-Recent 列表项形如 `意图摘要 ⇒ 最终答案`。
+- `logs/llm/YYYY/MM/DD.jsonl`：逐行保存 THINK/FINAL Prompt 与 Response，可追溯 Agent 推理。
+
+## 3. 配置速览
+原型默认使用仓库内的示例配置：
+- `config/beat.yml`：心跳间隔与意图阈值。
+- `config/agent.yml`：ReAct 步数与 Persona。
+- `config/llm.yml`：
+  - 默认 `local_stub`，便于在无外部依赖的情况下验证流程。
+  - 可改为 `openai`，复制 `config/llm.openai.example.yml` 并设置 `model`、`api_key_env`（默认 `OPENAI_API_KEY`）。
+
+如需实验不同 Persona 或步数，可直接修改对应 YAML 并重启进程。
+
+## 4. Docker 运行提示
+- 首次运行前执行 `mkdir -p data`，以便将宿主机目录挂载到容器内的 `/app/data`。
+- 通过 `docker compose up -d` 启动后，API 监听 `http://localhost:8080`。
+- 日志与文件落盘仍位于宿主机 `./data`，可直接观察 `intent/`、`journals/` 与 `sp/` 变化。
