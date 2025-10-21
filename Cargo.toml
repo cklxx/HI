@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/hi_telos"]
+default-members = ["crates/hi_telos"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"

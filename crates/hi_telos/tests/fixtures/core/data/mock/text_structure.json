@@ -1,0 +1,41 @@
+{
+  "content": {
+    "title": "Telos Core Flow",
+    "summary": "Structured walkthrough of the Beat \u2192 ReAct \u2192 Archive pipeline using mock data.",
+    "sections": [
+      {
+        "heading": "Inbox Preparation",
+        "body": [
+          "Install the baseline fixtures to populate inbox intents and configuration files.",
+          "Confirm environment variables HI_APP_ROOT and HI_SERVER_BIND are exported before starting the server."
+        ],
+        "children": [
+          {
+            "heading": "Checklist",
+            "body": [
+              "Run cargo run -p hi_telos --bin bootstrap_fixtures -- ./tmp/hi-telos-core.",
+              "Inspect data/intent/inbox for the seed markdown intent."
+            ]
+          }
+        ]
+      },
+      {
+        "heading": "Processing",
+        "body": [
+          "Call POST /api/intents to enqueue a new request and trigger Beat scheduling.",
+          "Observe the orchestrator logs for THINK/ACT/OBSERVE traces to mirror the production flow."
+        ],
+        "children": [
+          {
+            "heading": "Outputs",
+            "body": [
+              "Review data/intent/history for archived intents.",
+              "Open data/journals/YYYY/MM/DD.md to validate rendered reasoning steps."
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "note": "Seeded Telos preview"
+}

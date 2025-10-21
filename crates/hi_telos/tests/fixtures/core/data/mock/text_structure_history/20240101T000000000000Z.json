@@ -1,0 +1,15 @@
+{
+  "content": {
+    "title": "Fixture Snapshot",
+    "summary": "Baseline structured text captured for regression testing.",
+    "sections": [
+      {
+        "heading": "Context",
+        "body": [
+          "This snapshot illustrates the expected schema for structured text history entries."
+        ]
+      }
+    ]
+  },
+  "note": "Initial fixture snapshot"
+}

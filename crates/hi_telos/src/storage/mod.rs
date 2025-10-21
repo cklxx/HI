@@ -12,6 +12,14 @@ use walkdir::WalkDir;
 
 use crate::{agent::AgentOutcome, llm::LlmLogEntry, tasks::Intent};
 
+mod structured_text;
+pub use structured_text::{
+    LoadedStructuredTextPreview, StructuredContent, StructuredSection, StructuredTextHistoryEntry,
+    StructuredTextHistoryFilters, delete_structured_text_preview, list_structured_text_history,
+    load_structured_text_history_entry, load_structured_text_preview,
+    restore_structured_text_preview_from_history, save_structured_text_preview,
+};
+
 const REQUIRED_DIRS: &[&str] = &[
     "intent/inbox",
     "intent/queue",
@@ -21,6 +29,8 @@ const REQUIRED_DIRS: &[&str] = &[
     "journals",
     "sp",
     "logs/llm",
+    "mock",
+    "mock/text_structure_history",
 ];
 
 pub fn ensure_data_layout(data_dir: &Path) -> anyhow::Result<()> {

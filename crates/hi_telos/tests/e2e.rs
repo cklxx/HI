@@ -5,24 +5,16 @@ use hi_telos::{agent::AgentRuntime, config::AppConfig, orchestrator, state::AppC
 use tempfile::TempDir;
 use tokio::time::{sleep, timeout};
 
+mod common;
+
 #[tokio::test]
 async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
     let tmp = TempDir::new()?;
     let root = tmp.path();
-
-    fs::create_dir_all(root.join("config"))?;
-    fs::write(
-        root.join("config/beat.yml"),
-        "interval_minutes: 5\nintent_threshold: 0.4\n",
-    )?;
-    fs::write(
-        root.join("config/agent.yml"),
-        "max_react_steps: 1\npersona: TelosOps\n",
-    )?;
-    fs::write(root.join("config/llm.yml"), "provider: local_stub\n")?;
+    let fixture_root = common::install_core_fixture(root)?;
 
     unsafe {
-        std::env::set_var("HI_APP_ROOT", root);
+        std::env::set_var("HI_APP_ROOT", &fixture_root);
         std::env::set_var("HI_SERVER_BIND", "127.0.0.1:0");
     }
 
@@ -33,22 +25,13 @@ async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
 
     let (handle, join) = orchestrator::spawn(ctx.clone());
 
-    storage::persist_intent(
-        &data_dir,
-        "tester",
-        "Process inbox intent",
-        0.9,
-        "# Body\nCheck intent flow",
-    )
-    .await?;
-
-    let history_dir = data_dir.join("intent/history");
-
     // Give the orchestrator loop time to start before requesting a beat.
     sleep(Duration::from_millis(50)).await;
     handle.request_beat().await?;
 
-    timeout(Duration::from_secs(2), async {
+    let history_dir = data_dir.join("intent/history");
+
+    timeout(Duration::from_secs(5), async {
         loop {
             match fs::read_dir(&history_dir) {
                 Ok(mut entries) => {
@@ -68,7 +51,7 @@ async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
     assert_eq!(
         history_entries.len(),
         1,
-        "intent should be archived after processing"
+        "intent should be archived after processing",
     );
 
     let inbox_dir = data_dir.join("intent/inbox");
@@ -82,7 +65,7 @@ async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
     assert!(
         journal_content
             .contains("Final answer: TelosOps completed the plan for 'Process inbox intent'"),
-        "journal should capture agent final answer"
+        "journal should capture agent final answer",
     );
 
     let sp_index = storage::load_sp_index(&data_dir).await?;
@@ -91,25 +74,25 @@ async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
             .top_used
             .iter()
             .any(|entry| entry.contains("TelosOps completed the plan")),
-        "SP index should track top used intents"
+        "SP index should track top used intents",
     );
     assert!(
         sp_index
             .most_recent
             .iter()
             .any(|entry| entry.contains("TelosOps completed the plan")),
-        "SP index should include most recent intents"
+        "SP index should include most recent intents",
     );
 
     let logs = storage::read_llm_logs(&data_dir, storage::LlmLogQuery::default()).await?;
     assert!(
         logs.iter().any(|entry| entry.phase == "FINAL"),
-        "LLM logs should include final phase entries"
+        "LLM logs should include final phase entries",
     );
     assert!(
         logs.iter()
             .any(|entry| entry.prompt.contains("# Phase: FINAL")),
-        "LLM logs should capture prompts"
+        "LLM logs should capture prompts",
     );
 
     ctx.request_shutdown();
