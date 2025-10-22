@@ -228,11 +228,19 @@ pub async fn read_llm_logs(
                 continue;
             }
 
-            if let Some(ref run_id) = query.run_id && &entry.run_id != run_id {
+            if query
+                .run_id
+                .as_ref()
+                .is_some_and(|run_id| &entry.run_id != run_id)
+            {
                 continue;
             }
 
-            if let Some(ref since) = query.since && &entry.timestamp < since {
+            if query
+                .since
+                .as_ref()
+                .is_some_and(|since| &entry.timestamp < since)
+            {
                 continue;
             }
 
