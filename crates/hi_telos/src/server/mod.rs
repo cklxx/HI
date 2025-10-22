@@ -66,6 +66,10 @@ fn router(state: ServerState) -> Router {
         .route("/healthz", get(health))
         .route("/api/sp", get(sp_summary))
         .route("/api/meta/acceptance", get(acceptance_overview))
+        .route(
+            "/api/meta/acceptance/module/:module",
+            get(acceptance_module_overview),
+        )
         .route("/api/md/tree", get(md_tree))
         .route("/api/md/file", get(md_file))
         .route("/api/logs/llm", get(llm_logs))
@@ -146,6 +150,35 @@ async fn acceptance_overview(State(state): State<ServerState>) -> impl IntoRespo
                 error = ?err,
                 path = %doc_path.display(),
                 "failed to load acceptance summary"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn acceptance_module_overview(
+    State(state): State<ServerState>,
+    Path(module): Path<String>,
+) -> impl IntoResponse {
+    let config = state.ctx().config();
+    let config_dir = config.config_dir.clone();
+    drop(config);
+
+    let Some(root) = config_dir.parent() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    let doc_path = root.join("docs/work_acceptance_plan.md");
+
+    match acceptance::load_module_acceptance_summary(&doc_path, &module).await {
+        Ok(Some(summary)) => Json(summary).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            warn!(
+                error = ?err,
+                module = module,
+                path = %doc_path.display(),
+                "failed to load acceptance module summary"
             );
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
@@ -678,6 +711,59 @@ mod tests {
             payload["task_matrix"][0]["status"],
             serde_json::Value::String("✅".to_string())
         );
+
+        let module_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/meta/acceptance/module/API")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("module response");
+        assert_eq!(module_response.status(), StatusCode::OK);
+        let body = module_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let module_payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(module_payload["module"], "API");
+        assert_eq!(module_payload["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            module_payload["metrics"]["tasks_total"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            module_payload["metrics"]["overall_status"],
+            serde_json::json!("complete")
+        );
+
+        let fuzzy_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/meta/acceptance/module/api")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("fuzzy module response");
+        assert_eq!(fuzzy_response.status(), StatusCode::OK);
+
+        let missing_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/meta/acceptance/module/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("missing module response");
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
 
         ctx.request_shutdown();
         let _ = join.await;

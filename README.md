@@ -74,6 +74,7 @@ HI/
 - `GET /api/mock/text_structure/history/{id}`：按快照 ID（如 `20240101T000000000000Z`）返回对应的结构化文本历史版本。
 - `POST /api/mock/text_structure/history/{id}/restore`：将指定快照恢复为当前 Mock 预览，同时会记录新的历史快照。
 - `GET /api/meta/acceptance`：解析 `docs/work_acceptance_plan.md`，返回任务矩阵、聚合统计（模块/待办/验证步骤计数与整体状态）、当前已完成/待办 TODO 列表与验证方案概览，便于前端或 QA 查看交付状态。
+- `GET /api/meta/acceptance/module/{module}`：基于模块名称（支持大小写与模糊匹配）返回该模块下的任务清单与完成度指标，帮助前端按需展示局部进度。
 - `GET /healthz`：健康检查。
 - 内部 Beat：
   - Inbox 筛选 → Queue。

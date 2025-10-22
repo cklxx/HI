@@ -16,6 +16,20 @@ pub struct AcceptanceSummary {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct ModuleAcceptanceSummary {
+    pub module: String,
+    pub metrics: ModuleAcceptanceMetrics,
+    pub tasks: Vec<TaskMatrixEntry>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct ModuleAcceptanceMetrics {
+    pub tasks_total: usize,
+    pub tasks_completed: usize,
+    pub overall_status: AcceptanceOverallStatus,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct AcceptanceSource {
     pub doc_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,6 +112,51 @@ pub async fn load_acceptance_summary(doc_path: &Path) -> anyhow::Result<Acceptan
         pending_todos,
         validation_plan,
     })
+}
+
+pub async fn load_module_acceptance_summary(
+    doc_path: &Path,
+    module_query: &str,
+) -> anyhow::Result<Option<ModuleAcceptanceSummary>> {
+    let trimmed_query = module_query.trim();
+    if trimmed_query.is_empty() {
+        return Ok(None);
+    }
+
+    let summary = load_acceptance_summary(doc_path).await?;
+    let Some(module_name) = resolve_module_name(&summary.task_matrix, trimmed_query) else {
+        return Ok(None);
+    };
+
+    let tasks: Vec<_> = summary
+        .task_matrix
+        .into_iter()
+        .filter(|entry| entry.module.trim().eq_ignore_ascii_case(module_name.trim()))
+        .collect();
+
+    if tasks.is_empty() {
+        return Ok(None);
+    }
+
+    let tasks_completed = tasks
+        .iter()
+        .filter(|entry| status_indicates_completion(&entry.status))
+        .count();
+    let metrics = ModuleAcceptanceMetrics {
+        tasks_total: tasks.len(),
+        tasks_completed,
+        overall_status: if tasks_completed == tasks.len() {
+            AcceptanceOverallStatus::Complete
+        } else {
+            AcceptanceOverallStatus::InProgress
+        },
+    };
+
+    Ok(Some(ModuleAcceptanceSummary {
+        module: module_name,
+        metrics,
+        tasks,
+    }))
 }
 
 struct ParsedAcceptancePlan {
@@ -300,6 +359,26 @@ fn status_indicates_completion(status: &str) -> bool {
         || normalized.contains("完成")
 }
 
+fn resolve_module_name(task_matrix: &[TaskMatrixEntry], query: &str) -> Option<String> {
+    let trimmed_query = query.trim();
+    if trimmed_query.is_empty() {
+        return None;
+    }
+
+    if let Some(entry) = task_matrix
+        .iter()
+        .find(|entry| entry.module.trim().eq_ignore_ascii_case(trimmed_query))
+    {
+        return Some(entry.module.clone());
+    }
+
+    let query_lower = trimmed_query.to_lowercase();
+    task_matrix
+        .iter()
+        .find(|entry| entry.module.to_lowercase().contains(&query_lower))
+        .map(|entry| entry.module.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +494,67 @@ mod tests {
             AcceptanceOverallStatus::InProgress
         );
         assert!(summary.source.updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn load_module_acceptance_summary_matches_exact_module() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let doc_path = tmp.path().join("plan.md");
+        tokio::fs::write(
+            &doc_path,
+            "## 2. 任务矩阵\n| 模块 | 任务 | 状态 |\n| --- | --- | --- |\n| API | Build endpoint | ✅ |\n| API | Wire auth | 进行中 |\n| 前端 | Hook data | ✅ |\n",
+        )
+        .await
+        .expect("write plan");
+
+        let module_summary = load_module_acceptance_summary(&doc_path, "API")
+            .await
+            .expect("load module")
+            .expect("module summary");
+
+        assert_eq!(module_summary.module, "API");
+        assert_eq!(module_summary.tasks.len(), 2);
+        assert_eq!(module_summary.metrics.tasks_total, 2);
+        assert_eq!(module_summary.metrics.tasks_completed, 1);
+        assert_eq!(
+            module_summary.metrics.overall_status,
+            AcceptanceOverallStatus::InProgress
+        );
+        assert!(
+            module_summary
+                .tasks
+                .iter()
+                .any(|entry| entry.task == "Build endpoint")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_module_acceptance_summary_supports_fuzzy_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let doc_path = tmp.path().join("plan.md");
+        tokio::fs::write(
+            &doc_path,
+            "## 2. 任务矩阵\n| 模块 | 任务 | 状态 |\n| --- | --- | --- |\n| Frontend UI | Wire mock data | ✅ |\n| Backend API | Provide summary | 进行中 |\n",
+        )
+        .await
+        .expect("write plan");
+
+        let module_summary = load_module_acceptance_summary(&doc_path, "frontend")
+            .await
+            .expect("load module")
+            .expect("module summary");
+
+        assert_eq!(module_summary.module, "Frontend UI");
+        assert_eq!(module_summary.metrics.tasks_total, 1);
+        assert_eq!(
+            module_summary.metrics.overall_status,
+            AcceptanceOverallStatus::Complete
+        );
+
+        let none_summary = load_module_acceptance_summary(&doc_path, "ops")
+            .await
+            .expect("load module");
+        assert!(none_summary.is_none());
     }
 
     #[test]

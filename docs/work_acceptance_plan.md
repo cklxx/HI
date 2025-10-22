@@ -2,7 +2,7 @@
 
 ## 1. 里程碑
 - **ReAct MVP（当前）**：交付包含 LLM/Agent 能力的内部闭环。
-- REST 接口：`/api/intents`、`/api/sp`、`/api/logs/llm`、`/api/mock/text_structure`（GET/POST/DELETE，GET 返回 `source`、`note` 与 `updated_at` 元信息）、`/api/mock/text_structure/history`（可指定 `limit` 返回最近快照）、`/api/mock/text_structure/history/{id}`（查看单条快照）以及 `POST /api/mock/text_structure/history/{id}/restore`（恢复到任意快照）、`/healthz`。
+- REST 接口：`/api/intents`、`/api/sp`、`/api/logs/llm`、`/api/mock/text_structure`（GET/POST/DELETE，GET 返回 `source`、`note` 与 `updated_at` 元信息）、`/api/mock/text_structure/history`（可指定 `limit` 返回最近快照）、`/api/mock/text_structure/history/{id}`（查看单条快照）以及 `POST /api/mock/text_structure/history/{id}/restore`（恢复到任意快照）、`/api/meta/acceptance`（汇总 TODO 与验收矩阵）、`/api/meta/acceptance/module/{module}`（模块级视图，支持模糊匹配）与 `/healthz`。
   - Beat Orchestrator：定时 ticker + 内部 `request_beat`，完成 Inbox → Queue → Agent → History。
   - Agent/LLM：使用本地 Stub 执行 ReAct，写入 Journal 与 SP 指标。
   - 存储：Markdown/JSON 落盘，维护 Journals、History、SP 指标及失败隔离队列。
@@ -44,6 +44,7 @@
 - [x] 评估真实 LLM 接入与速率治理策略：提供 OpenAI 客户端样例配置与限速策略说明。
 - [x] 暴露 `/api/meta/acceptance` 聚合接口：解析任务矩阵、TODO 与验证方案用于交付状态看板。
 - [x] `/api/meta/acceptance` 增强聚合统计：返回模块、待办与验证步骤计数，以及整体完成状态字段，便于前端图表展示。
+- [x] `/api/meta/acceptance/module/{module}` 模块过滤视图：提供大小写/模糊匹配支持，方便前端按模块渲染局部进度。
 
 ### 4.2 进行中/待定
 - 当前无新增 TODO，后续需求需先更新 PRD/TechDesign。
@@ -61,4 +62,4 @@ TODO 与技术设计保持同步，详见 [TechDesign.md](../TechDesign.md)。
 
 验证前建议运行 `cargo test` 覆盖全部单元与集成测试；如需人工验证，按照第 3 节“验收步骤”依次执行。
 
-> 注：可通过 `GET /api/meta/acceptance` 直接拉取本清单的最新解析结果，用于前端校验或 QA 状态看板。
+> 注：可通过 `GET /api/meta/acceptance` 获取完整汇总，或调用 `GET /api/meta/acceptance/module/{module}` 针对单个模块拉取最新解析结果，用于前端校验或 QA 状态看板。
