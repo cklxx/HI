@@ -49,10 +49,16 @@ impl ServerState {
 }
 
 pub async fn serve(state: ServerState) -> anyhow::Result<()> {
-    let app = router(state.clone());
     let addr: SocketAddr = state.ctx().config().server.addr().parse()?;
     let listener = TcpListener::bind(addr).await?;
+    serve_with_listener(listener, state).await
+}
+
+pub async fn serve_with_listener(listener: TcpListener, state: ServerState) -> anyhow::Result<()> {
+    let addr = listener.local_addr()?;
     info!(%addr, "server listening");
+
+    let app = router(state.clone());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.ctx().clone()))

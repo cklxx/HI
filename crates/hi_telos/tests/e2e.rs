@@ -1,9 +1,22 @@
 use std::{fs, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use hi_telos::{agent::AgentRuntime, config::AppConfig, orchestrator, state::AppContext, storage};
+use hi_telos::{
+    agent::AgentRuntime,
+    config::AppConfig,
+    orchestrator,
+    server::{self, ServerState},
+    state::AppContext,
+    storage::{self, StructuredContent, StructuredSection},
+};
+use reqwest::Client;
+use serde::Deserialize;
+use serde_json::json;
 use tempfile::TempDir;
-use tokio::time::{sleep, timeout};
+use tokio::{
+    net::TcpListener,
+    time::{sleep, timeout},
+};
 
 mod common;
 
@@ -97,6 +110,169 @@ async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
 
     ctx.request_shutdown();
     let _ = join.await;
+
+    unsafe {
+        std::env::remove_var("HI_APP_ROOT");
+        std::env::remove_var("HI_SERVER_BIND");
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct TextStructurePreview {
+    title: String,
+    source: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TextStructureHistory {
+    entries: Vec<storage::StructuredTextHistoryEntry>,
+}
+
+#[tokio::test]
+async fn text_structure_mock_flow_via_http() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let root = tmp.path();
+    let fixture_root = common::install_core_fixture(root)?;
+
+    unsafe {
+        std::env::set_var("HI_APP_ROOT", &fixture_root);
+        std::env::set_var("HI_SERVER_BIND", "127.0.0.1:0");
+    }
+
+    let config = AppConfig::load()?;
+    let agent_runtime = AgentRuntime::from_app_config(&config)?;
+    let ctx = AppContext::new(config, Arc::new(agent_runtime));
+
+    let (orchestrator_handle, orchestrator_join) = orchestrator::spawn(ctx.clone());
+    let state = ServerState::new(ctx.clone(), orchestrator_handle);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(server::serve_with_listener(listener, state));
+
+    let client = Client::new();
+    let base_url = format!("http://{}", addr);
+
+    let mut attempts = 0;
+    loop {
+        match client.get(format!("{}/healthz", base_url)).send().await {
+            Ok(response) if response.status().is_success() => break,
+            _ if attempts > 20 => {
+                anyhow::bail!("server did not become ready in time");
+            }
+            _ => {
+                attempts += 1;
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+
+    let preview: TextStructurePreview = client
+        .get(format!("{}/api/mock/text_structure", base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(preview.source, "file");
+    assert_eq!(preview.note.as_deref(), Some("Seeded Telos preview"));
+
+    let updated_content = StructuredContent {
+        title: "E2E Title".to_string(),
+        summary: "Updated via e2e test".to_string(),
+        sections: vec![StructuredSection {
+            heading: "Section".to_string(),
+            body: vec!["Line".to_string()],
+            children: vec![],
+        }],
+    };
+
+    let update_payload = json!({
+        "content": updated_content,
+        "note": "Updated via e2e test",
+    });
+
+    let update_response = client
+        .post(format!("{}/api/mock/text_structure", base_url))
+        .json(&update_payload)
+        .send()
+        .await?;
+    assert_eq!(update_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let updated_preview: TextStructurePreview = client
+        .get(format!("{}/api/mock/text_structure", base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(updated_preview.title, "E2E Title");
+    assert_eq!(
+        updated_preview.note.as_deref(),
+        Some("Updated via e2e test")
+    );
+
+    let history: TextStructureHistory = client
+        .get(format!(
+            "{}/api/mock/text_structure/history?limit=10",
+            base_url
+        ))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert!(!history.entries.is_empty());
+    assert_eq!(
+        history.entries[0].note.as_deref(),
+        Some("Updated via e2e test")
+    );
+
+    let restore_target = history
+        .entries
+        .iter()
+        .find(|entry| entry.note.as_deref() == Some("Initial fixture snapshot"))
+        .expect("fixture snapshot should be present");
+
+    let restore_response = client
+        .post(format!(
+            "{}/api/mock/text_structure/history/{}/restore",
+            base_url, restore_target.id
+        ))
+        .send()
+        .await?;
+    assert_eq!(restore_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let restored_preview: TextStructurePreview = client
+        .get(format!("{}/api/mock/text_structure", base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(restored_preview.title, "Fixture Snapshot");
+    assert_eq!(
+        restored_preview.note.as_deref(),
+        Some("Initial fixture snapshot")
+    );
+
+    let delete_response = client
+        .delete(format!("{}/api/mock/text_structure", base_url))
+        .send()
+        .await?;
+    assert_eq!(delete_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let reset_preview: TextStructurePreview = client
+        .get(format!("{}/api/mock/text_structure", base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(reset_preview.source, "inline");
+    assert!(reset_preview.note.is_none());
+
+    ctx.request_shutdown();
+    let _ = orchestrator_join.await;
+    server.await??;
 
     unsafe {
         std::env::remove_var("HI_APP_ROOT");
