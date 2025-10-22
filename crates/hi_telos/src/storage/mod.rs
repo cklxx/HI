@@ -222,22 +222,18 @@ pub async fn read_llm_logs(
                 }
             }
 
-            if let Some(ref phase) = query.phase {
-                if !entry.phase.eq_ignore_ascii_case(phase) {
-                    continue;
-                }
+            if let Some(ref phase) = query.phase
+                && !entry.phase.eq_ignore_ascii_case(phase)
+            {
+                continue;
             }
 
-            if let Some(ref run_id) = query.run_id {
-                if &entry.run_id != run_id {
-                    continue;
-                }
+            if let Some(ref run_id) = query.run_id && &entry.run_id != run_id {
+                continue;
             }
 
-            if let Some(ref since) = query.since {
-                if &entry.timestamp < since {
-                    continue;
-                }
+            if let Some(ref since) = query.since && &entry.timestamp < since {
+                continue;
             }
 
             results.push(entry);
@@ -327,14 +323,14 @@ fn scan_intent_dir(dir: &Path) -> anyhow::Result<Vec<IntentRecord>> {
 fn parse_intent_front_matter(content: &str) -> anyhow::Result<IntentFrontMatter> {
     let trimmed = content.trim_start();
     let yaml_block = if let Some(rest) = trimmed.strip_prefix("---") {
-        let rest = rest.trim_start_matches(|c| matches!(c, '\n' | '\r'));
+        let rest = rest.trim_start_matches(['\n', '\r']);
         if let Some(end) = rest.find("\n---") {
             &rest[..end]
         } else {
             rest
         }
     } else {
-        trimmed.splitn(2, "\n\n").next().unwrap_or_default()
+        trimmed.split("\n\n").next().unwrap_or_default()
     };
 
     if yaml_block.trim().is_empty() {

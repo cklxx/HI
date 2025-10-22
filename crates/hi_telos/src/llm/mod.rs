@@ -201,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_returns_react_step_payload() {
-        let client = LocalStubClient::default();
+        let client = LocalStubClient;
         let response = client
             .chat(
                 "# Phase: THINK\nIntent: Ship MVP\nBacklog: 4\nPersona: TelosOps\nHistory:\n(none)",
@@ -216,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_returns_final_answer_payload() {
-        let client = LocalStubClient::default();
+        let client = LocalStubClient;
         let response = client
             .chat("# Phase: FINAL\nIntent: Ship MVP\nPersona: TelosOps\nHistory:\n1. Thought")
             .await
@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_rejects_unknown_phase() {
-        let client = LocalStubClient::default();
+        let client = LocalStubClient;
         let err = client.chat("# Phase: PLAN").await.unwrap_err();
         assert!(
             err.to_string()

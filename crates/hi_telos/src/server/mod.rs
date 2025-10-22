@@ -904,7 +904,7 @@ mod tests {
             "response",
             &identity,
         );
-        storage::append_llm_logs(&data_dir, &[log_entry.clone()])
+        storage::append_llm_logs(&data_dir, std::slice::from_ref(&log_entry))
             .await
             .expect("append log");
 

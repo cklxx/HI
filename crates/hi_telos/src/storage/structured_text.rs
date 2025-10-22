@@ -210,8 +210,7 @@ pub async fn list_structured_text_history(
 
     if let Some(filters) = filters {
         if let Some(since) = filters.since.as_ref() {
-            let since = since.clone();
-            entries.retain(|entry| entry.saved_at >= since);
+            entries.retain(|entry| entry.saved_at >= *since);
         }
 
         if let Some(needle) = filters.note_query.as_ref().and_then(|query| {
@@ -297,10 +296,10 @@ async fn prune_structured_text_history(history_dir: &Path, limit: usize) -> Resu
     }
 
     for (_, path) in indexed.into_iter().skip(limit) {
-        if let Err(err) = fs::remove_file(&path).await {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                return Err(err.into());
-            }
+        if let Err(err) = fs::remove_file(&path).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err.into());
         }
     }
 
@@ -372,10 +371,10 @@ fn parse_snapshot(raw: &str) -> Result<StructuredTextSnapshot> {
 }
 
 fn entry_contains_query(entry: &StructuredTextHistoryEntry, needle: &str) -> bool {
-    if let Some(note) = entry.note.as_ref() {
-        if note.to_lowercase().contains(needle) {
-            return true;
-        }
+    if let Some(note) = entry.note.as_ref()
+        && note.to_lowercase().contains(needle)
+    {
+        return true;
     }
 
     if entry.content.title.to_lowercase().contains(needle)
@@ -501,7 +500,7 @@ mod tests {
             .await
             .expect("history dir");
         let mut count = 0;
-        while let Some(_) = entries.next_entry().await.expect("entry") {
+        while entries.next_entry().await.expect("entry").is_some() {
             count += 1;
         }
         assert_eq!(count, 1);

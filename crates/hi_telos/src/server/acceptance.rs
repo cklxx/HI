@@ -316,10 +316,10 @@ fn parse_markdown_row_cells(line: &str, expected_cells: usize) -> Option<Vec<Str
         return None;
     }
 
-    if cells.first().map_or(false, |c| c.is_empty()) {
+    if cells.first().is_some_and(|c| c.is_empty()) {
         cells.remove(0);
     }
-    if cells.last().map_or(false, |c| c.is_empty()) {
+    if cells.last().is_some_and(|c| c.is_empty()) {
         cells.pop();
     }
 
