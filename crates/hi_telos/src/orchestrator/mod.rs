@@ -199,16 +199,15 @@ impl BeatOrchestrator {
                                 "intent failed after max retries"
                             );
 
-                            if let Some(path) = intent.storage_path.as_ref() {
-                                if let Err(move_err) =
+                            if let Some(path) = intent.storage_path.as_ref()
+                                && let Err(move_err) =
                                     storage::quarantine_failed_intent(path, &data_dir)
-                                {
-                                    warn!(
-                                        intent = %intent.summary,
-                                        error = ?move_err,
-                                        "failed to move intent to failed queue"
-                                    );
-                                }
+                            {
+                                warn!(
+                                    intent = %intent.summary,
+                                    error = ?move_err,
+                                    "failed to move intent to failed queue"
+                                );
                             }
 
                             attempts.remove(&intent_id);

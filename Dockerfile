@@ -3,15 +3,17 @@
 FROM rust:1.80-slim-bullseye AS chef
 WORKDIR /workspace
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && rm -rf /var/lib/apt/lists/*
-COPY hi_telos/Cargo.toml hi_telos/Cargo.lock ./hi_telos/
-RUN mkdir -p hi_telos/src && \
-    echo 'fn main() {}' > hi_telos/src/main.rs && \
-    cargo build --release --manifest-path hi_telos/Cargo.toml && \
-    rm -rf hi_telos/src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/hi_telos/Cargo.toml crates/hi_telos/
+RUN mkdir -p crates/hi_telos/src && \
+    echo 'fn main() {}' > crates/hi_telos/src/main.rs && \
+    cargo build --release --package hi_telos && \
+    rm -rf crates
 
 FROM chef AS builder
-COPY hi_telos/src ./hi_telos/src
-RUN cargo build --release --manifest-path hi_telos/Cargo.toml
+COPY crates/hi_telos/src ./crates/hi_telos/src
+COPY crates/hi_telos/tests ./crates/hi_telos/tests
+RUN cargo build --release --package hi_telos
 
 FROM debian:bullseye-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

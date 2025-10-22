@@ -12,6 +12,14 @@ use walkdir::WalkDir;
 
 use crate::{agent::AgentOutcome, llm::LlmLogEntry, tasks::Intent};
 
+mod structured_text;
+pub use structured_text::{
+    LoadedStructuredTextPreview, StructuredContent, StructuredSection, StructuredTextHistoryEntry,
+    StructuredTextHistoryFilters, delete_structured_text_preview, list_structured_text_history,
+    load_structured_text_history_entry, load_structured_text_preview,
+    restore_structured_text_preview_from_history, save_structured_text_preview,
+};
+
 const REQUIRED_DIRS: &[&str] = &[
     "intent/inbox",
     "intent/queue",
@@ -21,6 +29,8 @@ const REQUIRED_DIRS: &[&str] = &[
     "journals",
     "sp",
     "logs/llm",
+    "mock",
+    "mock/text_structure_history",
 ];
 
 pub fn ensure_data_layout(data_dir: &Path) -> anyhow::Result<()> {
@@ -212,22 +222,26 @@ pub async fn read_llm_logs(
                 }
             }
 
-            if let Some(ref phase) = query.phase {
-                if !entry.phase.eq_ignore_ascii_case(phase) {
-                    continue;
-                }
+            if let Some(ref phase) = query.phase
+                && !entry.phase.eq_ignore_ascii_case(phase)
+            {
+                continue;
             }
 
-            if let Some(ref run_id) = query.run_id {
-                if &entry.run_id != run_id {
-                    continue;
-                }
+            if query
+                .run_id
+                .as_ref()
+                .is_some_and(|run_id| &entry.run_id != run_id)
+            {
+                continue;
             }
 
-            if let Some(ref since) = query.since {
-                if &entry.timestamp < since {
-                    continue;
-                }
+            if query
+                .since
+                .as_ref()
+                .is_some_and(|since| &entry.timestamp < since)
+            {
+                continue;
             }
 
             results.push(entry);
@@ -317,14 +331,14 @@ fn scan_intent_dir(dir: &Path) -> anyhow::Result<Vec<IntentRecord>> {
 fn parse_intent_front_matter(content: &str) -> anyhow::Result<IntentFrontMatter> {
     let trimmed = content.trim_start();
     let yaml_block = if let Some(rest) = trimmed.strip_prefix("---") {
-        let rest = rest.trim_start_matches(|c| matches!(c, '\n' | '\r'));
+        let rest = rest.trim_start_matches(['\n', '\r']);
         if let Some(end) = rest.find("\n---") {
             &rest[..end]
         } else {
             rest
         }
     } else {
-        trimmed.splitn(2, "\n\n").next().unwrap_or_default()
+        trimmed.split("\n\n").next().unwrap_or_default()
     };
 
     if yaml_block.trim().is_empty() {

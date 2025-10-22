@@ -53,7 +53,7 @@ impl AgentRuntime {
 
     pub fn from_app_config(config: &AppConfig) -> anyhow::Result<Self> {
         let llm_client: Arc<dyn LlmClient> = match &config.llm {
-            LlmProviderConfig::LocalStub => Arc::new(LocalStubClient::default()),
+            LlmProviderConfig::LocalStub => Arc::new(LocalStubClient),
             LlmProviderConfig::OpenAi {
                 model,
                 api_key_env,
@@ -198,7 +198,7 @@ mod tests {
                 max_react_steps: 2,
                 persona: "TelosOps".to_string(),
             },
-            Arc::new(LocalStubClient::default()),
+            Arc::new(LocalStubClient),
         );
 
         let run = runtime
