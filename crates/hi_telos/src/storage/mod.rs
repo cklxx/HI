@@ -1,10 +1,12 @@
+use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
-use std::{fmt::Write, fs};
+use std::{fmt::Write, fs, str::FromStr};
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Datelike, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::fs::{self as async_fs, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -12,7 +14,12 @@ use walkdir::WalkDir;
 
 use crate::{agent::AgentOutcome, llm::LlmLogEntry, tasks::Intent};
 
+mod memory;
 mod structured_text;
+pub use memory::{
+    MemoryAnchor, MemoryEntry, MemoryLevel, MemoryQuery, MemorySnapshotInput,
+    ingest_memory_snapshot, read_memory_entries,
+};
 pub use structured_text::{
     LoadedStructuredTextPreview, StructuredContent, StructuredSection, StructuredTextHistoryEntry,
     StructuredTextHistoryFilters, delete_structured_text_preview, list_structured_text_history,
@@ -31,6 +38,10 @@ const REQUIRED_DIRS: &[&str] = &[
     "logs/llm",
     "mock",
     "mock/text_structure_history",
+    "messages",
+    "memory",
+    "memory/l1",
+    "memory/l2",
 ];
 
 pub fn ensure_data_layout(data_dir: &Path) -> anyhow::Result<()> {
@@ -290,6 +301,11 @@ pub fn scan_queue(data_dir: &Path) -> anyhow::Result<Vec<IntentRecord>> {
     scan_intent_dir(&queue_dir)
 }
 
+pub fn scan_history(data_dir: &Path) -> anyhow::Result<Vec<IntentRecord>> {
+    let history_dir = data_dir.join("intent/history");
+    scan_intent_dir(&history_dir)
+}
+
 fn scan_intent_dir(dir: &Path) -> anyhow::Result<Vec<IntentRecord>> {
     let mut records = Vec::new();
 
@@ -443,7 +459,7 @@ pub async fn append_journal_entry(
     data_dir: &Path,
     intent: &Intent,
     outcome: &AgentOutcome,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PathBuf> {
     let now = Utc::now();
     let journal_dir = data_dir
         .join("journals")
@@ -485,16 +501,16 @@ pub async fn append_journal_entry(
 
     file.write_all(entry.as_bytes()).await?;
     file.flush().await?;
-    Ok(())
+    Ok(journal_path)
 }
 
-pub async fn archive_intent(intent: &Intent, data_dir: &Path) -> anyhow::Result<()> {
+pub async fn archive_intent(intent: &Intent, data_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     let Some(path) = intent.storage_path.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
 
     if !path.exists() {
-        return Ok(());
+        return Ok(None);
     }
 
     let history_dir = data_dir.join("intent/history");
@@ -503,8 +519,8 @@ pub async fn archive_intent(intent: &Intent, data_dir: &Path) -> anyhow::Result<
         .file_name()
         .ok_or_else(|| anyhow!("intent path missing file name: {:?}", path))?;
     let destination = history_dir.join(file_name);
-    async_fs::rename(path, destination).await?;
-    Ok(())
+    async_fs::rename(path, &destination).await?;
+    Ok(Some(destination))
 }
 
 #[derive(Debug, Deserialize)]
@@ -615,6 +631,206 @@ fn upsert_most_recent(entries: &mut Vec<SpEntry>, summary: &str, now: DateTime<U
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDirection {
+    Inbound,
+    Outbound,
+}
+
+impl MessageDirection {
+    pub fn as_dir(&self) -> &'static str {
+        match self {
+            MessageDirection::Inbound => "inbound",
+            MessageDirection::Outbound => "outbound",
+        }
+    }
+}
+
+impl FromStr for MessageDirection {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "in" | "inbound" => Ok(MessageDirection::Inbound),
+            "out" | "outbound" => Ok(MessageDirection::Outbound),
+            _ => Err("unknown direction"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageLogEntry {
+    pub id: Uuid,
+    pub direction: MessageDirection,
+    pub source: String,
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub text: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageLogQuery {
+    pub source: Option<String>,
+    pub direction: Option<MessageDirection>,
+    pub since: Option<DateTime<Utc>>,
+    pub limit: usize,
+}
+
+impl Default for MessageLogQuery {
+    fn default() -> Self {
+        Self {
+            source: None,
+            direction: None,
+            since: None,
+            limit: 50,
+        }
+    }
+}
+
+pub async fn append_message_entry(data_dir: &Path, entry: &MessageLogEntry) -> anyhow::Result<()> {
+    let date = entry.timestamp.date_naive();
+    let day_dir = data_dir
+        .join("messages")
+        .join(&entry.source)
+        .join(entry.direction.as_dir())
+        .join(format!("{:04}", date.year()))
+        .join(format!("{:02}", date.month()));
+    async_fs::create_dir_all(&day_dir).await?;
+
+    let file_path = day_dir.join(format!("{:02}.jsonl", date.day()));
+    let serialized = serde_json::to_string(entry)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file_path)
+        .await?;
+    file.write_all(serialized.as_bytes()).await?;
+    file.write_all(
+        b"
+",
+    )
+    .await?;
+    file.flush().await?;
+    Ok(())
+}
+
+pub fn read_messages(
+    data_dir: &Path,
+    query: MessageLogQuery,
+) -> anyhow::Result<Vec<MessageLogEntry>> {
+    let root = data_dir.join("messages");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut source_dirs = Vec::new();
+    if let Some(source) = &query.source {
+        let path = root.join(source);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        source_dirs.push(path);
+    } else {
+        for entry in fs::read_dir(&root).with_context(|| "reading messages sources")? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                source_dirs.push(entry.path());
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    for source_dir in source_dirs {
+        let target_dirs: Vec<PathBuf> = if let Some(direction) = &query.direction {
+            vec![source_dir.join(direction.as_dir())]
+        } else {
+            let mut dirs = Vec::new();
+            for entry in fs::read_dir(&source_dir)
+                .with_context(|| format!("reading message direction dir {:?}", source_dir))?
+            {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    dirs.push(entry.path());
+                }
+            }
+            if dirs.is_empty() {
+                vec![source_dir.join("inbound"), source_dir.join("outbound")]
+            } else {
+                dirs
+            }
+        };
+
+        for dir in target_dirs {
+            if !dir.exists() {
+                continue;
+            }
+            for year in
+                fs::read_dir(&dir).with_context(|| format!("reading message year dir {:?}", dir))?
+            {
+                let year = year?;
+                if !year.file_type()?.is_dir() {
+                    continue;
+                }
+                for month in fs::read_dir(year.path())
+                    .with_context(|| format!("reading message month dir {:?}", year.path()))?
+                {
+                    let month = month?;
+                    if !month.file_type()?.is_dir() {
+                        continue;
+                    }
+                    for file in fs::read_dir(month.path())
+                        .with_context(|| format!("reading message file dir {:?}", month.path()))?
+                    {
+                        let file = file?;
+                        if file.file_type()?.is_file() {
+                            files.push(file.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    files.sort();
+
+    let mut entries = Vec::new();
+    for path in files.iter().rev() {
+        let file =
+            fs::File::open(path).with_context(|| format!("opening message log {:?}", path))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry: MessageLogEntry = serde_json::from_str(&line)
+                .with_context(|| format!("parsing message log {:?}", path))?;
+            if query
+                .since
+                .as_ref()
+                .is_some_and(|since| entry.timestamp < *since)
+            {
+                continue;
+            }
+            entries.push(entry);
+        }
+        if entries.len() >= query.limit {
+            break;
+        }
+    }
+
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    if entries.len() > query.limit {
+        entries.truncate(query.limit);
+    }
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,17 +909,9 @@ mod tests {
         let intent = sample_intent_with_path(source_path.clone());
         let outcome = sample_outcome();
 
-        append_journal_entry(temp.path(), &intent, &outcome)
+        let journal_path = append_journal_entry(temp.path(), &intent, &outcome)
             .await
             .unwrap();
-
-        let now = Utc::now();
-        let journal_path = temp
-            .path()
-            .join("journals")
-            .join(format!("{:04}", now.year()))
-            .join(format!("{:02}", now.month()))
-            .join(format!("{:02}.md", now.day()));
 
         let entry = tokio::fs::read_to_string(&journal_path).await.unwrap();
         assert!(entry.contains("Final answer: Done"));
@@ -775,6 +983,53 @@ mod tests {
             .await
             .expect("markdown should be readable");
         assert!(content.contains("# Title"));
+    }
+
+    #[tokio::test]
+    async fn append_and_read_message_logs() {
+        let temp = tempdir().unwrap();
+        ensure_data_layout(temp.path()).unwrap();
+
+        let first = MessageLogEntry {
+            id: Uuid::new_v4(),
+            direction: MessageDirection::Inbound,
+            source: "telegram".to_string(),
+            chat_id: "42".to_string(),
+            author: Some("alice".to_string()),
+            text: "hello".to_string(),
+            timestamp: Utc::now(),
+            metadata: None,
+        };
+        let mut second = first.clone();
+        second.id = Uuid::new_v4();
+        second.direction = MessageDirection::Outbound;
+        second.text = "world".to_string();
+        second.author = Some("bot".to_string());
+        second.timestamp = Utc::now() + chrono::Duration::seconds(1);
+
+        append_message_entry(temp.path(), &first)
+            .await
+            .expect("write inbound message");
+        append_message_entry(temp.path(), &second)
+            .await
+            .expect("write outbound message");
+
+        let all = read_messages(temp.path(), MessageLogQuery::default()).expect("load messages");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].text, "world");
+        assert_eq!(all[1].text, "hello");
+
+        let inbound = read_messages(
+            temp.path(),
+            MessageLogQuery {
+                direction: Some(MessageDirection::Inbound),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .expect("filter inbound");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].text, "hello");
     }
 
     #[tokio::test]

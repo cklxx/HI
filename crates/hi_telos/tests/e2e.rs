@@ -12,6 +12,7 @@ use hi_telos::{
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use serial_test::serial;
 use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
@@ -21,6 +22,7 @@ use tokio::{
 mod common;
 
 #[tokio::test]
+#[serial]
 async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
     let tmp = TempDir::new()?;
     let root = tmp.path();
@@ -132,6 +134,7 @@ struct TextStructureHistory {
 }
 
 #[tokio::test]
+#[serial]
 async fn text_structure_mock_flow_via_http() -> Result<()> {
     let tmp = TempDir::new()?;
     let root = tmp.path();

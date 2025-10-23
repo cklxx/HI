@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub agent: AgentConfig,
     pub llm: LlmProviderConfig,
+    pub telegram: Option<TelegramConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +51,17 @@ pub struct ServerConfig {
     pub bind_addr: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramConfig {
+    pub bot_token: String,
+    #[serde(default)]
+    pub default_chat_id: Option<i64>,
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    #[serde(default = "default_telegram_api_base")]
+    pub api_base: String,
+}
+
 impl AppConfig {
     pub fn load() -> anyhow::Result<Self> {
         let root = match env::var("HI_APP_ROOT") {
@@ -61,6 +73,14 @@ impl AppConfig {
         let beat: BeatConfig = storage::load_yaml(config_dir.join("beat.yml"))?;
         let agent: AgentConfig = storage::load_yaml(config_dir.join("agent.yml"))?;
         let llm: LlmProviderConfig = storage::load_yaml(config_dir.join("llm.yml"))?;
+        let telegram = {
+            let path = config_dir.join("telegram.yml");
+            if path.exists() {
+                Some(storage::load_yaml(path)?)
+            } else {
+                None
+            }
+        };
 
         storage::ensure_data_layout(&data_dir)?;
 
@@ -70,6 +90,7 @@ impl AppConfig {
             beat,
             agent,
             llm,
+            telegram,
             server: ServerConfig {
                 bind_addr: env::var("HI_SERVER_BIND")
                     .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
@@ -104,6 +125,10 @@ fn default_agent_persona() -> String {
 
 fn default_openai_api_key_env() -> String {
     "OPENAI_API_KEY".to_string()
+}
+
+fn default_telegram_api_base() -> String {
+    "https://api.telegram.org".to_string()
 }
 
 pub fn init_tracing() {
