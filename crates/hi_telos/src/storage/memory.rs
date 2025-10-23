@@ -71,10 +71,10 @@ pub async fn ingest_memory_snapshot(
     let now = Utc::now();
     let mut anchors = Vec::new();
 
-    if let Some(history) = input.history_path.as_ref() {
-        if let Some(anchor) = to_anchor(data_dir, "intent/history", history) {
-            anchors.push(anchor);
-        }
+    if let Some(history) = input.history_path.as_ref()
+        && let Some(anchor) = to_anchor(data_dir, "intent/history", history)
+    {
+        anchors.push(anchor);
     }
 
     if let Some(anchor) = to_anchor(data_dir, "journals", &input.journal_path) {
@@ -146,19 +146,18 @@ fn read_l1(data_dir: &Path, query: &MemoryQuery) -> anyhow::Result<Vec<MemoryEnt
             }
             let parsed: MemoryEntry = serde_json::from_str(line)
                 .with_context(|| format!("parsing memory l1 entry in {:?}", entry.path()))?;
-            if let Some(since) = query.since {
-                if parsed.created_at < since {
-                    continue;
-                }
+            if let Some(since) = query.since
+                && parsed.created_at < since
+            {
+                continue;
             }
-            if let Some(tag) = query.tag.as_ref() {
-                if !parsed
+            if let Some(tag) = query.tag.as_ref()
+                && !parsed
                     .tags
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(tag))
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             entries.push(parsed);
         }
@@ -187,19 +186,18 @@ fn read_l2(data_dir: &Path, query: &MemoryQuery) -> anyhow::Result<Vec<MemoryEnt
             .with_context(|| format!("reading memory l2 file {:?}", entry.path()))?;
         let parsed: MemoryEntry = serde_json::from_str(&content)
             .with_context(|| format!("parsing memory l2 entry in {:?}", entry.path()))?;
-        if let Some(since) = query.since {
-            if parsed.created_at < since {
-                continue;
-            }
+        if let Some(since) = query.since
+            && parsed.created_at < since
+        {
+            continue;
         }
-        if let Some(tag) = query.tag.as_ref() {
-            if !parsed
+        if let Some(tag) = query.tag.as_ref()
+            && !parsed
                 .tags
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(tag))
-            {
-                continue;
-            }
+        {
+            continue;
         }
         entries.push(parsed);
     }

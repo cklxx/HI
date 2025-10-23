@@ -311,9 +311,7 @@ fn parse_bullet(line: &str) -> Option<String> {
         content = stripped.to_string();
     }
 
-    if content.is_empty() {
-        None
-    } else if is_placeholder_todo(&content) {
+    if content.is_empty() || is_placeholder_todo(&content) {
         None
     } else {
         Some(content)

@@ -590,7 +590,7 @@ async fn list_messages(
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|dt| dt.with_timezone(&Utc));
 
-    let limit = params.limit.unwrap_or(50).max(1).min(200);
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
 
     let query = MessageLogQuery {
         source,
@@ -1539,13 +1539,13 @@ default_chat_id: 12345
         let mut has_intent = false;
         for dir in ["intent/inbox", "intent/queue", "intent/history"] {
             let intent_dir = data_dir.join(dir);
-            if intent_dir.exists() {
-                if let Ok(mut entries) = fs::read_dir(&intent_dir) {
-                    if entries.next().is_some() {
-                        has_intent = true;
-                        break;
-                    }
-                }
+            if intent_dir.exists()
+                && fs::read_dir(&intent_dir)
+                    .map(|mut entries| entries.next().is_some())
+                    .unwrap_or(false)
+            {
+                has_intent = true;
+                break;
             }
         }
         assert!(has_intent, "telegram webhook should create intent markdown");

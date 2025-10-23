@@ -39,12 +39,12 @@ pub fn router() -> Router<ServerState> {
 }
 
 async fn ui_messages() -> Html<String> {
-    let body = format!(
-        "<section><h2>Inbox</h2><pre id=\"inbox\">Loading…</pre></section>\
-         <section><h2>Queue</h2><pre id=\"queue\">Loading…</pre></section>\
-         <section><h2>Archive</h2><pre id=\"history\">Loading…</pre></section>\
-         <section><h2>Telegram Inbound</h2><pre id=\"telegram-in\">Loading…</pre></section>\
-         <section><h2>Telegram Outbound</h2><pre id=\"telegram-out\">Loading…</pre></section>"
+    let body = String::from(
+        r#"<section><h2>Inbox</h2><pre id="inbox">Loading…</pre></section>
+         <section><h2>Queue</h2><pre id="queue">Loading…</pre></section>
+         <section><h2>Archive</h2><pre id="history">Loading…</pre></section>
+         <section><h2>Telegram Inbound</h2><pre id="telegram-in">Loading…</pre></section>
+         <section><h2>Telegram Outbound</h2><pre id="telegram-out">Loading…</pre></section>"#,
     );
 
     let script = r#"
@@ -102,10 +102,10 @@ async fn ui_messages() -> Html<String> {
 }
 
 async fn ui_markdown() -> Html<String> {
-    let body = format!(
-        "<section><h2>Markdown Tree</h2><ul id=\"file-list\" class=\"tree\"><li>Loading…</li></ul></section>\
-         <section><h2>验收概览</h2><pre id=\"acceptance\">Loading…</pre></section>\
-         <section><h2>Viewer</h2><div id=\"file-viewer\" class=\"viewer\"><em>选择左侧 Markdown 查看内容</em></div></section>"
+    let body = String::from(
+        r#"<section><h2>Markdown Tree</h2><ul id="file-list" class="tree"><li>Loading…</li></ul></section>
+         <section><h2>验收概览</h2><pre id="acceptance">Loading…</pre></section>
+         <section><h2>Viewer</h2><div id="file-viewer" class="viewer"><em>选择左侧 Markdown 查看内容</em></div></section>"#,
     );
 
     let script = r#"
@@ -213,10 +213,10 @@ async fn ui_markdown() -> Html<String> {
 }
 
 async fn ui_logs() -> Html<String> {
-    let body = format!(
-        "<section><h2>LLM Logs</h2><pre id=\"logs\">Loading…</pre></section>\
-         <section><h2>SP Index</h2><pre id=\"sp\">Loading…</pre></section>\
-         <section><h2>Memory Rollup</h2><pre id=\"memory\">Loading…</pre></section>"
+    let body = String::from(
+        r#"<section><h2>LLM Logs</h2><pre id="logs">Loading…</pre></section>
+         <section><h2>SP Index</h2><pre id="sp">Loading…</pre></section>
+         <section><h2>Memory Rollup</h2><pre id="memory">Loading…</pre></section>"#,
     );
 
     let script = r#"
@@ -582,7 +582,7 @@ fn format_message_line(entry: MessageLogEntry) -> String {
     let mut text = entry.text.replace('\n', " ");
     if text.len() > 160 {
         text.truncate(157);
-        text.push_str("…");
+        text.push('…');
     }
     format!(
         "{} [{}] {} #{} | {}",
@@ -598,7 +598,7 @@ fn format_memory_entry(entry: MemoryEntry) -> String {
     let mut headline = entry.summary.replace('\n', " ");
     if headline.len() > 120 {
         headline.truncate(117);
-        headline.push_str("…");
+        headline.push('…');
     }
     let details: Vec<String> = entry
         .details
@@ -719,12 +719,12 @@ fn format_log_entry(entry: LlmLogEntry) -> String {
     let mut prompt = entry.prompt.replace('\n', " ");
     if prompt.len() > 160 {
         prompt.truncate(157);
-        prompt.push_str("…");
+        prompt.push('…');
     }
     let mut response = entry.response.replace('\n', " ");
     if response.len() > 160 {
         response.truncate(157);
-        response.push_str("…");
+        response.push('…');
     }
     format!(
         "{} [{}] {}{}\n→ {}",
@@ -744,7 +744,7 @@ fn response_line(prompt: String, response: String) -> String {
     format!(" {}", prompt) + "\n   ↳ " + &response
 }
 
-async fn sp_summary_lines(data_dir: &PathBuf) -> Option<Vec<String>> {
+async fn sp_summary_lines(data_dir: &Path) -> Option<Vec<String>> {
     match storage::load_sp_index(data_dir).await {
         Ok(SpIndex {
             top_used,
