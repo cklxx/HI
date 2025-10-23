@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -89,12 +89,14 @@ pub async fn load_acceptance_summary(doc_path: &Path) -> anyhow::Result<Acceptan
         validation_plan,
     } = parse_acceptance_plan(&content);
 
+    let ModuleCompletionCounts {
+        total: modules_total,
+        completed: modules_completed,
+    } = summarize_module_completion(&task_matrix);
+
     let metrics = AcceptanceMetrics {
-        modules_total: task_matrix.len(),
-        modules_completed: task_matrix
-            .iter()
-            .filter(|entry| status_indicates_completion(&entry.status))
-            .count(),
+        modules_total,
+        modules_completed,
         todos_completed: completed_todos.len(),
         todos_pending: pending_todos.len(),
         validation_steps: validation_plan.len(),
@@ -267,6 +269,36 @@ fn parse_acceptance_plan(markdown: &str) -> ParsedAcceptancePlan {
     }
 }
 
+struct ModuleCompletionCounts {
+    total: usize,
+    completed: usize,
+}
+
+fn summarize_module_completion(task_matrix: &[TaskMatrixEntry]) -> ModuleCompletionCounts {
+    let mut modules: HashMap<String, bool> = HashMap::new();
+
+    for entry in task_matrix {
+        let module = entry.module.trim();
+        if module.is_empty() {
+            continue;
+        }
+
+        let normalized = module.to_lowercase();
+        let entry_complete = status_indicates_completion(&entry.status);
+        modules
+            .entry(normalized)
+            .and_modify(|complete| {
+                *complete &= entry_complete;
+            })
+            .or_insert(entry_complete);
+    }
+
+    let total = modules.len();
+    let completed = modules.values().filter(|complete| **complete).count();
+
+    ModuleCompletionCounts { total, completed }
+}
+
 fn parse_bullet(line: &str) -> Option<String> {
     if !line.starts_with('-') {
         return None;
@@ -281,9 +313,29 @@ fn parse_bullet(line: &str) -> Option<String> {
 
     if content.is_empty() {
         None
+    } else if is_placeholder_todo(&content) {
+        None
     } else {
         Some(content)
     }
+}
+
+fn is_placeholder_todo(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let compact: String = lowered.chars().filter(|c| !c.is_whitespace()).collect();
+
+    compact.contains("当前无新增")
+        || compact.contains("暂无")
+        || compact.contains("无待办")
+        || compact.contains("无todo")
+        || compact.contains("notodo")
+        || lowered == "none"
+        || lowered == "n/a"
 }
 
 fn parse_table_row(line: &str) -> Option<ValidationEntry> {
@@ -464,6 +516,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_acceptance_plan_skips_placeholder_todos() {
+        let markdown = r#"
+### 4.1 已完成清单
+- [x] Done
+
+### 4.2 进行中/待定
+- 当前无新增 TODO
+- [ ] Pending work
+"#;
+
+        let ParsedAcceptancePlan {
+            completed_todos,
+            pending_todos,
+            ..
+        } = parse_acceptance_plan(markdown);
+
+        assert_eq!(completed_todos.len(), 1);
+        assert_eq!(completed_todos[0].label, "Done");
+
+        assert_eq!(pending_todos.len(), 1);
+        assert_eq!(pending_todos[0].label, "Pending work");
+    }
+
+    #[test]
+    fn placeholder_detection_covers_common_phrases() {
+        let placeholders = ["当前无新增 TODO", "暂无待办", "None", "n/a", "无待办事项"];
+
+        for placeholder in placeholders {
+            assert!(is_placeholder_todo(placeholder));
+        }
+
+        assert!(!is_placeholder_todo("需要上线"));
+    }
+
     #[tokio::test]
     async fn load_acceptance_summary_reads_metadata() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -494,6 +581,25 @@ mod tests {
             AcceptanceOverallStatus::InProgress
         );
         assert!(summary.source.updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn load_acceptance_summary_counts_unique_modules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let doc_path = tmp.path().join("plan.md");
+        tokio::fs::write(
+            &doc_path,
+            "## 2. 任务矩阵\n| 模块 | 任务 | 状态 |\n| --- | --- | --- |\n| API | Build endpoint | ✅ |\n| api | Wire auth | 进行中 |\n| 前端 | Connect data | 完成 |\n| Ops | Harden deploy | ✅ |\n",
+        )
+        .await
+        .expect("write plan");
+
+        let summary = load_acceptance_summary(&doc_path)
+            .await
+            .expect("load summary");
+
+        assert_eq!(summary.metrics.modules_total, 3);
+        assert_eq!(summary.metrics.modules_completed, 2);
     }
 
     #[tokio::test]
@@ -590,5 +696,41 @@ mod tests {
         assert!(status_indicates_completion("已完成"));
         assert!(!status_indicates_completion("进行中"));
         assert!(!status_indicates_completion(""));
+    }
+
+    #[test]
+    fn summarize_module_completion_merges_case_and_ignores_blank() {
+        let task_matrix = vec![
+            TaskMatrixEntry {
+                module: "API".into(),
+                task: "Expose endpoint".into(),
+                status: "✅".into(),
+            },
+            TaskMatrixEntry {
+                module: "api".into(),
+                task: "Handle auth".into(),
+                status: "进行中".into(),
+            },
+            TaskMatrixEntry {
+                module: "Frontend".into(),
+                task: "Render page".into(),
+                status: "Complete".into(),
+            },
+            TaskMatrixEntry {
+                module: "Ops".into(),
+                task: "Deploy".into(),
+                status: "已完成".into(),
+            },
+            TaskMatrixEntry {
+                module: "  ".into(),
+                task: "Ignore me".into(),
+                status: "✅".into(),
+            },
+        ];
+
+        let ModuleCompletionCounts { total, completed } = summarize_module_completion(&task_matrix);
+
+        assert_eq!(total, 3);
+        assert_eq!(completed, 2);
     }
 }

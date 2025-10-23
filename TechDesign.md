@@ -83,7 +83,7 @@
 - **state**：封装 `Arc` 状态（配置、Agent Runtime、关闭通知、队列）。
 - **llm**：定义 `LlmClient` 接口与 `LocalStubClient` 实现，后续可扩展真实提供方。
 - **agent**：构造 ReAct Prompt、解析 LLM JSON 响应并生成 `AgentOutcome`。
-- **storage**：提供 Markdown/JSON 读写、目录扫描、Journal/History/SP 维护。
+- **storage**：提供 Markdown/JSON 读写、目录扫描、Journal/History/SP 维护，并生成带锚点的多级记忆摘要索引供 API 检索。
 - **orchestrator**：驱动心跳、处理失败重试、调用 Agent 并落盘结果。
 - **server**：Axum 路由层，暴露 API 并在写入意图后请求内部 Beat。
 - **server**：Axum 路由层，暴露 API 并在写入意图后请求内部 Beat，同时提供 `GET /api/md/tree`、`GET /api/md/file` 浏览 `data/` 中的 Markdown（支持 HTML 渲染），以及 `GET /api/logs/llm` 返回 LLM 调用日志。
@@ -106,5 +106,8 @@
 - [x] 引入 Agent Runtime + LLM Stub，完成 ReAct 闭环。
 - [x] 为 storage/agent/llm 扩充单元测试覆盖。
 - [x] 评估真实 LLM 接入所需的鉴权、速率与日志策略（新增 OpenAI 客户端，提供 API Key/Org/Base URL 配置）。
+- [x] 打通外部沟通通道（Telegram Webhook、消息推送）并补充 `/api/messages` 视图层。
+- [x] 设计与实现多级记忆压缩流水线，产出可检索的 L1/L2 摘要索引。
+- [x] 构建最小化 Web UI（`/ui/messages`、`/ui/md`、`/ui/logs`），采用复古配色复用 API 输出，并通过 SSE 长链接提供实时看板。
 
 以上 TODO 同步记录在 [docs/work_acceptance_plan.md](docs/work_acceptance_plan.md)。

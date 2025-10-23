@@ -49,7 +49,7 @@ HI-Telos OS 是一个「以终为始」的**全自动智能人系统**。系统�
 - LLM Orchestrator（本地模型巡航；高级/最高模型回退与限额；工具调用）  
 - Memory：**多级压缩**（会话树/里程碑摘要/证据链引用），替代 KV Cache  
 - Publisher：静态网页产出（/www）与目录索引  
-- 极简 Web：`/ui/messages`、`/ui/md`、`/ui/logs`、`/ui/sp`
+- 极简 Web：`/ui/messages`、`/ui/md`、`/ui/logs`（已交付，采用复古 SSE 长链接看板）
 
 ### 3.2 v1（+4–6 周）
 - Toolsmith：声明式工具与沙箱执行回执  

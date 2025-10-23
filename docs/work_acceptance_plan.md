@@ -38,6 +38,7 @@
 ## 4. TODO 追踪
 
 ### 4.1 已完成清单
+- [x] Telegram Webhook 与消息 API：自动记录入站/出站消息、生成意图并在 `/api/messages` 及 Web UI 长连面板展示。
 - [x] Orchestrator 失败重试与失败隔离：Beat 在重试期间会自动切换到失败隔离队列。
 - [x] 引入 LLM Stub + ReAct Agent：Stub LLM 支持 ReAct 推理并写入 Journals/SP 指标。
 - [x] 扩充 storage/agent/llm 单元测试覆盖：保证 Mock 数据、LLM 调用记录及结构化文本历史的持久化能力。
@@ -45,9 +46,14 @@
 - [x] 暴露 `/api/meta/acceptance` 聚合接口：解析任务矩阵、TODO 与验证方案用于交付状态看板。
 - [x] `/api/meta/acceptance` 增强聚合统计：返回模块、待办与验证步骤计数，以及整体完成状态字段，便于前端图表展示。
 - [x] `/api/meta/acceptance/module/{module}` 模块过滤视图：提供大小写/模糊匹配支持，方便前端按模块渲染局部进度。
+- [x] 交付极简 Web UI：`/ui/messages`、`/ui/md`、`/ui/logs` 复用现有 API，以复古风格呈现并通过 SSE 长链接实时刷新。
+- [x] 多级记忆压缩：生成 L1/L2 摘要索引并附带原始 Markdown 锚点，供 Beat 与 Agent 检索复用。
 
 ### 4.2 进行中/待定
-- 当前无新增 TODO，后续需求需先更新 PRD/TechDesign。
+- [x] 对接外部沟通渠道：实现 Telegram Webhook、`/api/messages` 只读接口与推送能力，打通「收/发」闭环。
+- [x] 构建多级记忆压缩管线：落地 L1/L2 摘要与引用锚点，暴露检索接口供 Beat 与 Agent 复用。
+
+> 若需扩展超出当前范围的新能力，应先同步更新 PRD/TechDesign，再在此处补充对应 TODO。
 
 TODO 与技术设计保持同步，详见 [TechDesign.md](../TechDesign.md)。
 

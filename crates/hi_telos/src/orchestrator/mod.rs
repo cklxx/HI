@@ -74,13 +74,14 @@ impl BeatOrchestrator {
         })
         .await?;
 
-        self.run_with_retry(&intent.summary, "journal", || {
-            let data_dir = data_dir.clone();
-            let intent = intent.clone();
-            let outcome = outcome.clone();
-            async move { storage::append_journal_entry(&data_dir, &intent, &outcome).await }
-        })
-        .await?;
+        let journal_path = self
+            .run_with_retry(&intent.summary, "journal", || {
+                let data_dir = data_dir.clone();
+                let intent = intent.clone();
+                let outcome = outcome.clone();
+                async move { storage::append_journal_entry(&data_dir, &intent, &outcome).await }
+            })
+            .await?;
 
         self.run_with_retry(&intent.summary, "sp_index", || {
             let data_dir = data_dir.clone();
@@ -90,10 +91,38 @@ impl BeatOrchestrator {
         })
         .await?;
 
-        self.run_with_retry(&intent.summary, "archive", || {
+        let history_path = self
+            .run_with_retry(&intent.summary, "archive", || {
+                let data_dir = data_dir.clone();
+                let intent = intent.clone();
+                async move { storage::archive_intent(&intent, &data_dir).await }
+            })
+            .await?;
+
+        let memory_intent = intent.clone();
+        let memory_outcome = outcome.clone();
+        let memory_journal = journal_path.clone();
+        let memory_history = history_path.clone();
+
+        self.run_with_retry(&intent.summary, "memory", move || {
             let data_dir = data_dir.clone();
-            let intent = intent.clone();
-            async move { storage::archive_intent(&intent, &data_dir).await }
+            let intent = memory_intent.clone();
+            let outcome = memory_outcome.clone();
+            let journal_path = memory_journal.clone();
+            let history_path = memory_history.clone();
+            async move {
+                storage::ingest_memory_snapshot(
+                    &data_dir,
+                    storage::MemorySnapshotInput {
+                        intent,
+                        outcome,
+                        journal_path,
+                        history_path,
+                    },
+                )
+                .await
+                .map(|_| ())
+            }
         })
         .await?;
 
@@ -101,20 +130,21 @@ impl BeatOrchestrator {
         Ok(())
     }
 
-    async fn run_with_retry<F, Fut>(
+    async fn run_with_retry<F, Fut, T>(
         &self,
         summary: &str,
         stage: &'static str,
         mut operation: F,
-    ) -> anyhow::Result<()>
+    ) -> anyhow::Result<T>
     where
         F: FnMut() -> Fut,
-        Fut: Future<Output = anyhow::Result<()>> + Send,
+        Fut: Future<Output = anyhow::Result<T>> + Send,
+        T: Send,
     {
         let mut remaining = STORAGE_RETRY_ATTEMPTS;
         loop {
             match operation().await {
-                Ok(()) => return Ok(()),
+                Ok(value) => return Ok(value),
                 Err(err) if remaining > 1 => {
                     let attempt = STORAGE_RETRY_ATTEMPTS - remaining + 1;
                     warn!(

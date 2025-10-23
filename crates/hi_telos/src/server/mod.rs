@@ -1,27 +1,32 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, str::FromStr};
 
+use anyhow::{Context, anyhow};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
+use serde_json::json;
+use tokio::{net::TcpListener, task};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use uuid::Uuid;
 
 mod acceptance;
+mod ui;
 
 use crate::{
     orchestrator::OrchestratorHandle,
     state::AppContext,
     storage::{
-        self, LoadedStructuredTextPreview, StructuredContent, StructuredTextHistoryEntry,
+        self, LoadedStructuredTextPreview, MemoryLevel, MemoryQuery, MessageDirection,
+        MessageLogEntry, MessageLogQuery, StructuredContent, StructuredTextHistoryEntry,
         StructuredTextHistoryFilters,
     },
 };
@@ -97,7 +102,12 @@ fn router(state: ServerState) -> Router {
             "/api/mock/text_structure/history/:id/restore",
             post(restore_text_structure_history_entry),
         )
+        .route("/api/messages", get(list_messages))
+        .route("/api/messages/send", post(send_message))
+        .route("/api/memory", get(memory_timeline))
+        .route("/webhook/telegram", post(telegram_webhook))
         .route("/api/intents", post(create_intent))
+        .merge(ui::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -536,6 +546,448 @@ async fn llm_logs(
 }
 
 #[derive(Debug, Deserialize)]
+struct MessageQueryParams {
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
+    src: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    since: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MessageListResponse {
+    entries: Vec<MessageLogEntry>,
+}
+
+async fn list_messages(
+    State(state): State<ServerState>,
+    Query(params): Query<MessageQueryParams>,
+) -> impl IntoResponse {
+    let config = state.ctx().config();
+    let data_dir = config.data_dir.clone();
+    drop(config);
+
+    let direction = match params.dir.as_deref().filter(|value| !value.is_empty()) {
+        Some(raw) => match MessageDirection::from_str(raw) {
+            Ok(direction) => Some(direction),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        None => None,
+    };
+
+    let source = match params.src.as_deref().filter(|value| !value.is_empty()) {
+        Some("all") => None,
+        Some(other) => Some(other.to_string()),
+        None => None,
+    };
+
+    let since = params
+        .since
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|dt| dt.with_timezone(&Utc));
+
+    let limit = params.limit.unwrap_or(50).max(1).min(200);
+
+    let query = MessageLogQuery {
+        source,
+        direction,
+        since,
+        limit,
+    };
+
+    let handle = task::spawn_blocking(move || storage::read_messages(&data_dir, query));
+    match handle.await {
+        Ok(Ok(entries)) => Json(MessageListResponse { entries }).into_response(),
+        Ok(Err(err)) => {
+            warn!(error = ?err, "failed to load message logs");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(err) => {
+            warn!(error = ?err, "message log task join failure");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessageRequest {
+    #[serde(default)]
+    source: Option<String>,
+    text: String,
+    #[serde(default)]
+    chat_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SendMessageResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_message_id: Option<String>,
+}
+
+async fn send_message(
+    State(state): State<ServerState>,
+    Json(payload): Json<SendMessageRequest>,
+) -> impl IntoResponse {
+    let config = state.ctx().config();
+    let Some(telegram) = config.telegram.clone() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let data_dir = config.data_dir.clone();
+    drop(config);
+
+    let source = payload.source.unwrap_or_else(|| "telegram".to_string());
+    if source != "telegram" {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let text = payload.text.trim().to_string();
+    if text.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let chat_id = match payload.chat_id.or(telegram.default_chat_id) {
+        Some(id) => id,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let send_result = match dispatch_telegram_message(&telegram, chat_id, &text).await {
+        Ok(result) => result,
+        Err(err) => {
+            warn!(error = ?err, "failed to push telegram message");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+
+    let entry = MessageLogEntry {
+        id: Uuid::new_v4(),
+        direction: MessageDirection::Outbound,
+        source: "telegram".to_string(),
+        chat_id: chat_id.to_string(),
+        author: Some("telos".to_string()),
+        text: text.clone(),
+        timestamp: Utc::now(),
+        metadata: Some(json!({ "message_id": send_result.message_id })),
+    };
+
+    if let Err(err) = storage::append_message_entry(&data_dir, &entry).await {
+        warn!(error = ?err, "failed to persist outbound message log");
+    }
+
+    Json(SendMessageResponse {
+        ok: true,
+        provider_message_id: send_result.message_id.map(|id| id.to_string()),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryQueryParams {
+    level: Option<String>,
+    limit: Option<usize>,
+    since: Option<String>,
+    tag: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryTimelineResponse {
+    level: MemoryLevel,
+    entries: Vec<storage::MemoryEntry>,
+}
+
+async fn memory_timeline(
+    State(state): State<ServerState>,
+    Query(params): Query<MemoryQueryParams>,
+) -> impl IntoResponse {
+    let config = state.ctx().config();
+    let data_dir = config.data_dir.clone();
+    drop(config);
+
+    let level = match params
+        .level
+        .as_deref()
+        .map(parse_memory_level)
+        .unwrap_or(Some(MemoryLevel::L2))
+    {
+        Some(level) => level,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let since = match params.since.as_deref() {
+        Some(raw) => match DateTime::parse_from_rfc3339(raw) {
+            Ok(value) => Some(value.with_timezone(&Utc)),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        None => None,
+    };
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 200);
+    let query = MemoryQuery {
+        level,
+        limit,
+        since,
+        tag: params.tag.clone(),
+    };
+
+    let data_dir_clone = data_dir.clone();
+    let query_clone = query.clone();
+
+    let entries = match task::spawn_blocking(move || {
+        storage::read_memory_entries(&data_dir_clone, query_clone)
+    })
+    .await
+    {
+        Ok(Ok(entries)) => entries,
+        Ok(Err(err)) => {
+            warn!(error = ?err, "failed to load memory timeline");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Err(err) => {
+            warn!(error = ?err, "memory timeline task panicked");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    Json(MemoryTimelineResponse {
+        level: query.level,
+        entries,
+    })
+    .into_response()
+}
+
+fn parse_memory_level(raw: &str) -> Option<MemoryLevel> {
+    match raw.to_ascii_uppercase().as_str() {
+        "L1" => Some(MemoryLevel::L1),
+        "L2" => Some(MemoryLevel::L2),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramUpdate {
+    #[serde(default)]
+    message: Option<TelegramMessage>,
+    #[serde(default)]
+    channel_post: Option<TelegramMessage>,
+}
+
+impl TelegramUpdate {
+    fn primary_message(&self) -> Option<&TelegramMessage> {
+        self.message.as_ref().or(self.channel_post.as_ref())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramMessage {
+    message_id: i64,
+    date: i64,
+    #[serde(default)]
+    text: Option<String>,
+    chat: TelegramChat,
+    #[serde(default)]
+    from: Option<TelegramUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramChat {
+    id: i64,
+    #[serde(default, rename = "title")]
+    _title: Option<String>,
+    #[serde(default, rename = "username")]
+    _username: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramUser {
+    #[serde(default, rename = "id")]
+    _id: i64,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TelegramWebhookResponse {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent_id: Option<Uuid>,
+}
+
+async fn telegram_webhook(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(update): Json<TelegramUpdate>,
+) -> impl IntoResponse {
+    let config = state.ctx().config();
+    let Some(telegram) = config.telegram.clone() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let data_dir = config.data_dir.clone();
+    drop(config);
+
+    if let Some(expected) = telegram.webhook_secret.as_ref() {
+        match headers
+            .get("x-telegram-bot-api-secret-token")
+            .and_then(|value| value.to_str().ok())
+        {
+            Some(provided) if provided == expected => {}
+            Some(_) => return StatusCode::UNAUTHORIZED.into_response(),
+            None => return StatusCode::UNAUTHORIZED.into_response(),
+        }
+    }
+
+    let Some(message) = update.primary_message() else {
+        return Json(TelegramWebhookResponse {
+            status: "ignored".to_string(),
+            intent_id: None,
+        })
+        .into_response();
+    };
+
+    let Some(text) = message
+        .text
+        .as_ref()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+    else {
+        return Json(TelegramWebhookResponse {
+            status: "ignored".to_string(),
+            intent_id: None,
+        })
+        .into_response();
+    };
+
+    let timestamp = DateTime::<Utc>::from_timestamp(message.date, 0).unwrap_or_else(Utc::now);
+
+    let author = message.from.as_ref().and_then(|from| {
+        if let Some(username) = from.username.clone() {
+            Some(username)
+        } else {
+            let mut name = String::new();
+            if let Some(first) = &from.first_name {
+                name.push_str(first);
+            }
+            if let Some(last) = &from.last_name {
+                if !name.is_empty() {
+                    name.push(' ');
+                }
+                name.push_str(last);
+            }
+            if name.is_empty() { None } else { Some(name) }
+        }
+    });
+
+    let log_entry = MessageLogEntry {
+        id: Uuid::new_v4(),
+        direction: MessageDirection::Inbound,
+        source: "telegram".to_string(),
+        chat_id: message.chat.id.to_string(),
+        author: author.clone(),
+        text: text.to_string(),
+        timestamp,
+        metadata: Some(json!({ "message_id": message.message_id })),
+    };
+
+    if let Err(err) = storage::append_message_entry(&data_dir, &log_entry).await {
+        warn!(error = ?err, "failed to persist inbound telegram message");
+    }
+
+    let mut summary: String = text.chars().take(80).collect();
+    if text.chars().count() > 80 {
+        summary.push('…');
+    }
+
+    let body = format!(
+        "Telegram chat: {}
+Author: {}
+Message ID: {}
+
+{}",
+        message.chat.id,
+        author.clone().unwrap_or_else(|| "unknown".to_string()),
+        message.message_id,
+        text
+    );
+
+    let intent_result = storage::persist_intent(&data_dir, "telegram", &summary, 1.0, &body).await;
+
+    let intent_id = match intent_result {
+        Ok(record) => {
+            if let Err(err) = state.orchestrator().request_beat().await {
+                warn!(error = ?err, "failed to request beat after telegram intent");
+            }
+            Some(record.id)
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to persist intent from telegram message");
+            None
+        }
+    };
+
+    Json(TelegramWebhookResponse {
+        status: "queued".to_string(),
+        intent_id,
+    })
+    .into_response()
+}
+
+struct TelegramSendResult {
+    message_id: Option<i64>,
+}
+
+async fn dispatch_telegram_message(
+    config: &crate::config::TelegramConfig,
+    chat_id: i64,
+    text: &str,
+) -> anyhow::Result<TelegramSendResult> {
+    let client = Client::new();
+    let base = config.api_base.trim_end_matches('/');
+    let url = format!("{}/bot{}/sendMessage", base, config.bot_token);
+
+    let response = client
+        .post(url)
+        .json(&json!({
+            "chat_id": chat_id,
+            "text": text,
+        }))
+        .send()
+        .await
+        .with_context(|| "sending telegram message")?;
+
+    if !response.status().is_success() {
+        return Err(anyhow!("telegram returned status {}", response.status()));
+    }
+
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .with_context(|| "decoding telegram response")?;
+
+    let ok = payload
+        .get("ok")
+        .and_then(|flag| flag.as_bool())
+        .unwrap_or(false);
+    if !ok {
+        return Err(anyhow!("telegram send rejected: {}", payload));
+    }
+
+    let message_id = payload
+        .get("result")
+        .or_else(|| payload.get("message"))
+        .and_then(|value| value.get("message_id"))
+        .and_then(|value| value.as_i64());
+
+    Ok(TelegramSendResult { message_id })
+}
+
+#[derive(Debug, Deserialize)]
 struct NewIntentRequest {
     #[serde(default = "default_source")]
     source: String,
@@ -607,23 +1059,33 @@ fn default_alignment() -> f32 {
 mod tests {
     use super::*;
     use crate::{
-        agent::AgentRuntime,
+        agent::{AgentOutcome, AgentRuntime},
         config::AppConfig,
         orchestrator,
         state::AppContext,
-        storage::{self, StructuredContent, StructuredSection, write_markdown},
+        storage::{
+            self, MemorySnapshotInput, MessageDirection, MessageLogEntry, MessageLogQuery,
+            StructuredContent, StructuredSection, write_markdown,
+        },
+        tasks::Intent,
     };
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
+    use chrono::Duration;
     use http_body_util::BodyExt;
+    use httpmock::MockServer;
+    use serde_json::json;
+    use serial_test::serial;
     use std::{fs, sync::Arc};
     use tempfile::TempDir;
+    use tokio::task;
     use tower::ServiceExt;
     use uuid::Uuid;
 
     #[tokio::test]
+    #[serial]
     async fn acceptance_overview_reflects_markdown_plan() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
@@ -781,6 +1243,445 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
+    async fn messages_api_returns_recent_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("config")).expect("config dir");
+        fs::write(
+            root.join("config/beat.yml"),
+            "interval_minutes: 10
+intent_threshold: 0.5
+",
+        )
+        .expect("beat config");
+        fs::write(
+            root.join("config/agent.yml"),
+            "max_react_steps: 1
+persona: TelosOps
+",
+        )
+        .expect("agent config");
+        fs::write(
+            root.join("config/llm.yml"),
+            "provider: local_stub
+",
+        )
+        .expect("llm config");
+
+        unsafe {
+            std::env::set_var("HI_APP_ROOT", root);
+            std::env::set_var("HI_SERVER_BIND", "127.0.0.1:0");
+        }
+
+        let config = AppConfig::load().expect("load config");
+        let data_dir = config.data_dir.clone();
+        let agent = AgentRuntime::from_app_config(&config).expect("agent runtime");
+        let ctx = AppContext::new(config, Arc::new(agent));
+
+        let (handle, join) = orchestrator::spawn(ctx.clone());
+        let state = ServerState::new(ctx.clone(), handle);
+        let app = super::router(state.clone());
+
+        let now = Utc::now();
+        let inbound = MessageLogEntry {
+            id: Uuid::new_v4(),
+            direction: MessageDirection::Inbound,
+            source: "telegram".to_string(),
+            chat_id: "42".to_string(),
+            author: Some("alice".to_string()),
+            text: "inbound ping".to_string(),
+            timestamp: now - Duration::seconds(30),
+            metadata: None,
+        };
+        let outbound = MessageLogEntry {
+            id: Uuid::new_v4(),
+            direction: MessageDirection::Outbound,
+            source: "telegram".to_string(),
+            chat_id: "42".to_string(),
+            author: Some("bot".to_string()),
+            text: "outbound pong".to_string(),
+            timestamp: now,
+            metadata: None,
+        };
+
+        storage::append_message_entry(&data_dir, &inbound)
+            .await
+            .expect("write inbound message");
+        storage::append_message_entry(&data_dir, &outbound)
+            .await
+            .expect("write outbound message");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/messages?dir=in&src=telegram")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("messages response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: MessageListResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.entries.len(), 1);
+        assert_eq!(payload.entries[0].direction, MessageDirection::Inbound);
+        assert_eq!(payload.entries[0].text, "inbound ping");
+
+        ctx.request_shutdown();
+        let _ = join.await;
+
+        unsafe {
+            std::env::remove_var("HI_APP_ROOT");
+            std::env::remove_var("HI_SERVER_BIND");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn memory_timeline_returns_rollup() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("config")).expect("config dir");
+        fs::create_dir_all(root.join("docs")).expect("docs dir");
+        fs::write(
+            root.join("config/beat.yml"),
+            "interval_minutes: 10\nintent_threshold: 0.5\n",
+        )
+        .expect("beat config");
+        fs::write(
+            root.join("config/agent.yml"),
+            "max_react_steps: 1\npersona: TelosOps\n",
+        )
+        .expect("agent config");
+        fs::write(root.join("config/llm.yml"), "provider: local_stub\n").expect("llm config");
+        fs::write(root.join("docs/work_acceptance_plan.md"), "# plan\n").expect("plan doc");
+
+        unsafe {
+            std::env::set_var("HI_APP_ROOT", root);
+            std::env::set_var("HI_SERVER_BIND", "127.0.0.1:0");
+        }
+
+        let config = AppConfig::load().expect("load config");
+        let data_dir = config.data_dir.clone();
+        storage::ensure_data_layout(&data_dir).expect("layout");
+
+        let journal_path = data_dir.join("journals/2025/01/01.md");
+        fs::create_dir_all(journal_path.parent().unwrap()).expect("journal dir");
+        fs::write(&journal_path, "entry").expect("journal file");
+
+        let history_path = data_dir.join("intent/history/sample.md");
+        fs::create_dir_all(history_path.parent().unwrap()).expect("history dir");
+        fs::write(&history_path, "intent").expect("history file");
+
+        let intent = Intent {
+            id: Uuid::new_v4(),
+            source: "telegram".to_string(),
+            summary: "Summarize roadmap".to_string(),
+            telos_alignment: 0.9,
+            created_at: Utc::now(),
+            storage_path: None,
+        };
+        let outcome = AgentOutcome {
+            steps: Vec::new(),
+            final_answer: "Highlights captured".to_string(),
+        };
+
+        storage::ingest_memory_snapshot(
+            &data_dir,
+            MemorySnapshotInput {
+                intent: intent.clone(),
+                outcome,
+                journal_path: journal_path.clone(),
+                history_path: Some(history_path.clone()),
+            },
+        )
+        .await
+        .expect("ingest memory");
+
+        let agent = AgentRuntime::from_app_config(&config).expect("agent runtime");
+        let ctx = AppContext::new(config, Arc::new(agent));
+
+        let (handle, join) = orchestrator::spawn(ctx.clone());
+        let state = ServerState::new(ctx.clone(), handle);
+        let app = super::router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory?level=L2&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("memory response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["level"], serde_json::json!("L2"));
+        let entries = payload["entries"].as_array().unwrap();
+        assert!(!entries.is_empty());
+        assert!(!entries[0]["summary"].as_str().unwrap().is_empty());
+
+        ctx.request_shutdown();
+        let _ = join.await;
+
+        unsafe {
+            std::env::remove_var("HI_APP_ROOT");
+            std::env::remove_var("HI_SERVER_BIND");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn telegram_webhook_appends_message_and_intent() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("config")).expect("config dir");
+        fs::write(
+            root.join("config/beat.yml"),
+            "interval_minutes: 10
+intent_threshold: 0.5
+",
+        )
+        .expect("beat config");
+        fs::write(
+            root.join("config/agent.yml"),
+            "max_react_steps: 1
+persona: TelosOps
+",
+        )
+        .expect("agent config");
+        fs::write(
+            root.join("config/llm.yml"),
+            "provider: local_stub
+",
+        )
+        .expect("llm config");
+        fs::write(
+            root.join("config/telegram.yml"),
+            "bot_token: TEST_TOKEN
+webhook_secret: secret-token
+default_chat_id: 12345
+",
+        )
+        .expect("telegram config");
+
+        unsafe {
+            std::env::set_var("HI_APP_ROOT", root);
+            std::env::set_var("HI_SERVER_BIND", "127.0.0.1:0");
+        }
+
+        let config = AppConfig::load().expect("load config");
+        let data_dir = config.data_dir.clone();
+        let agent = AgentRuntime::from_app_config(&config).expect("agent runtime");
+        let ctx = AppContext::new(config, Arc::new(agent));
+
+        let (handle, join) = orchestrator::spawn(ctx.clone());
+        let state = ServerState::new(ctx.clone(), handle);
+        let app = super::router(state.clone());
+
+        let update = json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 99,
+                "date": Utc::now().timestamp(),
+                "chat": {"id": 4242, "type": "private"},
+                "from": {"id": 7, "username": "alice"},
+                "text": "Hello Telos",
+            }
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/telegram")
+                    .header("content-type", "application/json")
+                    .header("X-Telegram-Bot-Api-Secret-Token", "secret-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .expect("webhook response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: TelegramWebhookResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.status, "queued");
+        assert!(payload.intent_id.is_some());
+
+        let logs = task::spawn_blocking({
+            let data_dir = data_dir.clone();
+            move || {
+                storage::read_messages(
+                    &data_dir,
+                    MessageLogQuery {
+                        source: Some("telegram".to_string()),
+                        direction: Some(MessageDirection::Inbound),
+                        limit: 5,
+                        ..Default::default()
+                    },
+                )
+            }
+        })
+        .await
+        .expect("join")
+        .expect("load inbound logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].text, "Hello Telos");
+
+        let mut has_intent = false;
+        for dir in ["intent/inbox", "intent/queue", "intent/history"] {
+            let intent_dir = data_dir.join(dir);
+            if intent_dir.exists() {
+                if let Ok(mut entries) = fs::read_dir(&intent_dir) {
+                    if entries.next().is_some() {
+                        has_intent = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(has_intent, "telegram webhook should create intent markdown");
+
+        ctx.request_shutdown();
+        join.abort();
+
+        unsafe {
+            std::env::remove_var("HI_APP_ROOT");
+            std::env::remove_var("HI_SERVER_BIND");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn send_message_uses_telegram_api() {
+        let server = MockServer::start_async().await;
+        let token = "TEST_TOKEN";
+        let path = format!("/bot{token}/sendMessage");
+        let mock = {
+            let expected_path = path.clone();
+            server
+                .mock_async(move |when, then| {
+                    when.method("POST").path(expected_path.as_str());
+                    then.status(200)
+                        .header("content-type", "application/json")
+                        .json_body(json!({
+                            "ok": true,
+                            "result": {"message_id": 9001}
+                        }));
+                })
+                .await
+        };
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("config")).expect("config dir");
+        fs::write(
+            root.join("config/beat.yml"),
+            "interval_minutes: 10
+intent_threshold: 0.5
+",
+        )
+        .expect("beat config");
+        fs::write(
+            root.join("config/agent.yml"),
+            "max_react_steps: 1
+persona: TelosOps
+",
+        )
+        .expect("agent config");
+        fs::write(
+            root.join("config/llm.yml"),
+            "provider: local_stub
+",
+        )
+        .expect("llm config");
+        fs::write(
+            root.join("config/telegram.yml"),
+            format!(
+                "bot_token: {token}
+default_chat_id: 777
+webhook_secret: test
+api_base: {}
+",
+                server.base_url()
+            ),
+        )
+        .expect("telegram config");
+
+        unsafe {
+            std::env::set_var("HI_APP_ROOT", root);
+            std::env::set_var("HI_SERVER_BIND", "127.0.0.1:0");
+        }
+
+        let config = AppConfig::load().expect("load config");
+        let data_dir = config.data_dir.clone();
+        let agent = AgentRuntime::from_app_config(&config).expect("agent runtime");
+        let ctx = AppContext::new(config, Arc::new(agent));
+
+        let (handle, join) = orchestrator::spawn(ctx.clone());
+        let state = ServerState::new(ctx.clone(), handle);
+        let app = super::router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/messages/send")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "text": "Ping from test"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("send response");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert_async().await;
+
+        let logs = task::spawn_blocking({
+            let data_dir = data_dir.clone();
+            move || {
+                storage::read_messages(
+                    &data_dir,
+                    MessageLogQuery {
+                        source: Some("telegram".to_string()),
+                        direction: Some(MessageDirection::Outbound),
+                        limit: 5,
+                        ..Default::default()
+                    },
+                )
+            }
+        })
+        .await
+        .expect("join")
+        .expect("load outbound logs");
+        assert!(!logs.is_empty());
+        assert!(logs.iter().any(|entry| entry.text == "Ping from test"));
+
+        ctx.request_shutdown();
+        let _ = join.await;
+
+        unsafe {
+            std::env::remove_var("HI_APP_ROOT");
+            std::env::remove_var("HI_SERVER_BIND");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn markdown_endpoints_return_tree_and_file() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
@@ -956,6 +1857,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn structured_text_preview_can_be_updated_via_post() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
@@ -1259,6 +2161,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn structured_text_preview_can_be_reset_via_delete() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
@@ -1350,6 +2253,60 @@ mod tests {
             fetched.content.title,
             StructuredContent::mock_payload().title
         );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/messages")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("messages page");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(content_type.starts_with("text/html"));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("消息面板"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("logs page");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("日志面板"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/messages/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("messages stream");
+        assert_eq!(response.status(), StatusCode::OK);
+        let stream_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(stream_type.starts_with("text/event-stream"));
 
         ctx.request_shutdown();
         let _ = join.await;
