@@ -8,7 +8,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -26,8 +26,8 @@ use crate::{
     state::AppContext,
     storage::{
         self, LoadedStructuredTextPreview, MemoryLevel, MemoryQuery, MessageDirection,
-        MessageLogEntry, MessageLogQuery, StructuredContent, StructuredTextHistoryEntry,
-        StructuredTextHistoryFilters,
+        MessageLogEntry, MessageLogQuery, StructuredContent, StructuredSection,
+        StructuredTextHistoryEntry, StructuredTextHistoryFilters,
     },
 };
 
@@ -89,6 +89,10 @@ fn router(state: ServerState) -> Router {
             get(text_structure_preview)
                 .post(update_text_structure_preview)
                 .delete(reset_text_structure_preview),
+        )
+        .route(
+            "/api/mock/text_structure/seed",
+            post(seed_text_structure_preview),
         )
         .route(
             "/api/mock/text_structure/history",
@@ -348,6 +352,110 @@ async fn update_text_structure_preview(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => {
             warn!(error = ?err, "failed to persist structured text preview");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TextStructureSeedRequest {
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+async fn seed_text_structure_preview(
+    State(state): State<ServerState>,
+    payload: Option<Json<TextStructureSeedRequest>>,
+) -> impl IntoResponse {
+    let payload = payload.map(|Json(body)| body).unwrap_or_default();
+    let normalize = |value: &Option<String>| {
+        value
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+
+    let now = Local::now();
+    let note = normalize(&payload.note)
+        .unwrap_or_else(|| format!("Auto seeded via UI at {}", now.format("%F %T")));
+    let label = normalize(&payload.label)
+        .unwrap_or_else(|| format!("Auto Mock {}", now.format("%H:%M:%S")));
+    let summary = normalize(&payload.summary).unwrap_or_else(|| {
+        format!(
+            "Automatically generated at {} for interface end-to-end previews.",
+            now.format("%F %T")
+        )
+    });
+
+    let mut content = StructuredContent::mock_payload();
+    content.title = label;
+    content.summary = summary;
+    let intro_note = note.clone();
+    content.sections.insert(
+        0,
+        StructuredSection {
+            heading: format!("Seed Snapshot @ {}", now.format("%H:%M:%S")),
+            body: vec![
+                "Automatically generated mock data for the UI preview console.".to_string(),
+                "Use the refresh button to pull additional revisions or restore earlier drafts.".to_string(),
+                format!("Seed note: {intro_note}"),
+            ],
+            children: vec![],
+        },
+    );
+    let fallback_content = content.clone();
+
+    let config = state.ctx().config();
+    let data_dir = config.data_dir.clone();
+    drop(config);
+
+    match storage::save_structured_text_preview(&data_dir, &content, Some(note.as_str())).await {
+        Ok(()) => match storage::load_structured_text_preview(&data_dir).await {
+            Ok(Some(LoadedStructuredTextPreview {
+                content,
+                note,
+                updated_at,
+            })) => (
+                StatusCode::CREATED,
+                Json(TextStructurePreviewResponse {
+                    content,
+                    source: TextStructurePreviewSource::File,
+                    note,
+                    updated_at,
+                }),
+            )
+                .into_response(),
+            Ok(None) => (
+                StatusCode::CREATED,
+                Json(TextStructurePreviewResponse {
+                    content: fallback_content.clone(),
+                    source: TextStructurePreviewSource::File,
+                    note: Some(note.clone()),
+                    updated_at: None,
+                }),
+            )
+                .into_response(),
+            Err(err) => {
+                warn!(error = ?err, "failed to reload structured text preview after seeding");
+                (
+                    StatusCode::CREATED,
+                    Json(TextStructurePreviewResponse {
+                        content: fallback_content,
+                        source: TextStructurePreviewSource::File,
+                        note: Some(note),
+                        updated_at: None,
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        Err(err) => {
+            warn!(error = ?err, "failed to auto seed structured text preview");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -2150,6 +2258,108 @@ api_base: {}
             serde_json::from_slice(&body).expect("parse restored");
         assert_eq!(restored.content, desired);
         assert_eq!(restored.note.as_deref(), Some(initial_note));
+
+        ctx.request_shutdown();
+        let _ = join.await;
+
+        unsafe {
+            std::env::remove_var("HI_APP_ROOT");
+            std::env::remove_var("HI_SERVER_BIND");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn structured_text_preview_can_be_seeded() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("config")).expect("config dir");
+        fs::write(
+            root.join("config/beat.yml"),
+            "interval_minutes: 10\nintent_threshold: 0.5\n",
+        )
+        .expect("beat config");
+        fs::write(
+            root.join("config/agent.yml"),
+            "max_react_steps: 1\npersona: TelosOps\n",
+        )
+        .expect("agent config");
+        fs::write(root.join("config/llm.yml"), "provider: local_stub\n").expect("llm config");
+
+        unsafe {
+            std::env::set_var("HI_APP_ROOT", root);
+            std::env::set_var("HI_SERVER_BIND", "127.0.0.1:0");
+        }
+
+        let config = AppConfig::load().expect("load config");
+        let agent = AgentRuntime::from_app_config(&config).expect("agent runtime");
+        let data_dir = config.data_dir.clone();
+        let ctx = AppContext::new(config, Arc::new(agent));
+
+        let (handle, join) = orchestrator::spawn(ctx.clone());
+        let state = ServerState::new(ctx.clone(), handle);
+        let app = super::router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mock/text_structure/seed")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "note": "Seeded from test",
+                            "label": "Seeded Preview",
+                            "summary": "Seeded automatically via API",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("seed response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let preview: TextStructurePreviewResponse =
+            serde_json::from_slice(&body).expect("parse seeded preview");
+        assert_eq!(preview.content.title, "Seeded Preview");
+        assert_eq!(preview.content.summary, "Seeded automatically via API");
+        assert_eq!(preview.note.as_deref(), Some("Seeded from test"));
+        let first_section = preview
+            .content
+            .sections
+            .first()
+            .expect("seeded section present");
+        assert!(first_section.heading.starts_with("Seed Snapshot @"));
+        assert!(first_section
+            .body
+            .iter()
+            .any(|line| line.contains("Seeded from test")));
+
+        let stored = tokio::fs::read_to_string(data_dir.join("mock/text_structure.json"))
+            .await
+            .expect("read seeded file");
+        let stored: serde_json::Value = serde_json::from_str(&stored).expect("parse seeded file");
+        assert_eq!(stored["note"], serde_json::Value::String("Seeded from test".to_string()));
+
+        let history_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/mock/text_structure/history?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("history response");
+        assert_eq!(history_response.status(), StatusCode::OK);
+        let body = history_response.into_body().collect().await.unwrap().to_bytes();
+        let history: TextStructureHistoryResponse =
+            serde_json::from_slice(&body).expect("parse seeded history");
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].note.as_deref(), Some("Seeded from test"));
 
         ctx.request_shutdown();
         let _ = join.await;

@@ -281,6 +281,7 @@ async fn ui_mock_preview() -> Html<String> {
                </div>
                <div class=\"actions\">
                  <button type=\"button\" id=\"mock-refresh\" class=\"btn\">手动刷新</button>
+                 <button type=\"button\" id=\"mock-seed\" class=\"btn\">自动生成示例</button>
                  <span class=\"hint-inline\">每 15 秒自动刷新</span>
                </div>
              </div>
@@ -314,7 +315,11 @@ async fn ui_mock_preview() -> Html<String> {
   const sectionsEl = document.getElementById('mock-sections');
   const historyEl = document.getElementById('mock-history');
   const refreshBtn = document.getElementById('mock-refresh');
+  const seedBtn = document.getElementById('mock-seed');
+  const params = new URLSearchParams(window.location.search);
+  const shouldAutoSeed = params.get('autoSeed') === '1';
   const REFRESH_INTERVAL = 15000;
+  let autoSeedTriggered = false;
   let timerId = null;
 
   function setStatus(text) {
@@ -461,10 +466,34 @@ async fn ui_mock_preview() -> Html<String> {
     }
   }
 
+  function toggleSeed(disabled) {
+    if (!seedBtn) {
+      return;
+    }
+    seedBtn.disabled = disabled;
+    if (disabled) {
+      seedBtn.classList.add('disabled');
+    } else {
+      seedBtn.classList.remove('disabled');
+    }
+  }
+
+  function maybeTriggerAutoSeed(preview) {
+    if (!shouldAutoSeed || autoSeedTriggered) {
+      return;
+    }
+    if (preview && preview.source === 'inline') {
+      autoSeedTriggered = true;
+      runSeed('自动注入（UI 自动触发）');
+    } else {
+      autoSeedTriggered = true;
+    }
+  }
+
   function fetchData() {
     toggleRefresh(true);
     setStatus('加载中 …');
-    Promise.all([
+    return Promise.all([
       fetch('/api/mock/text_structure').then(function(response) {
         if (!response.ok) {
           throw new Error('preview HTTP ' + response.status);
@@ -482,8 +511,10 @@ async fn ui_mock_preview() -> Html<String> {
         const preview = results[0];
         const history = results[1];
         renderPreview(preview);
-        renderHistory(history);
+        renderHistory((history && history.entries) || history || []);
         setStatus('已加载（15 秒自动刷新）');
+        maybeTriggerAutoSeed(preview);
+        return preview;
       })
       .catch(function(err) {
         console.error('加载 Mock 数据失败', err);
@@ -494,9 +525,49 @@ async fn ui_mock_preview() -> Html<String> {
       });
   }
 
+  function runSeed(noteText) {
+    toggleSeed(true);
+    toggleRefresh(true);
+    setStatus('正在生成示例 …');
+    const nowText = new Date().toLocaleString('zh-CN', { hour12: false });
+    const payload = {
+      note: noteText || '自动生成于 ' + nowText,
+      label: 'UI Auto Mock',
+      summary: 'Generated via UI mock console at ' + nowText,
+    };
+    return fetch('/api/mock/text_structure/seed', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(function(response) {
+        if (!response.ok) {
+          throw new Error('seed HTTP ' + response.status);
+        }
+        return response.json();
+      })
+      .then(function() {
+        return fetchData();
+      })
+      .catch(function(err) {
+        console.error('生成示例失败', err);
+        setStatus('生成示例失败：' + err.message);
+        toggleRefresh(false);
+      })
+      .finally(function() {
+        toggleSeed(false);
+      });
+  }
+
   if (refreshBtn) {
     refreshBtn.addEventListener('click', function() {
       fetchData();
+    });
+  }
+
+  if (seedBtn) {
+    seedBtn.addEventListener('click', function() {
+      runSeed();
     });
   }
 
