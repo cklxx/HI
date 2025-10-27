@@ -180,7 +180,7 @@ async fn text_structure_mock_flow_via_http() -> Result<()> {
         .json()
         .await?;
     assert_eq!(preview.source, "file");
-    assert_eq!(preview.note.as_deref(), Some("Seeded Telos preview"));
+    assert_eq!(preview.note.as_deref(), Some("UI preview baseline"));
 
     let updated_content = StructuredContent {
         title: "E2E Title".to_string(),

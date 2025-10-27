@@ -51,38 +51,113 @@ impl StructuredContent {
     /// Convenience helper for generating the existing inline fallback payload.
     pub fn mock_payload() -> Self {
         Self {
-            title: "Telos Core Flow".to_string(),
-            summary: "A condensed view of how Telos processes intents from Beat to archival.".to_string(),
+            title: "Telos Operator Handbook".to_string(),
+            summary: "Mock content that mirrors a full operator runbook so the UI can exercise typography, metadata badges, and deep nesting.".to_string(),
             sections: vec![
                 StructuredSection {
-                    heading: "Overview".to_string(),
+                    heading: "1 · Environment Bootstrapping".to_string(),
                     body: vec![
-                        "The Telos orchestrator coordinates Beats, ReAct agents, and storage to deliver operator workflows.".to_string(),
-                        "This preview payload mirrors the shape expected by the front-end when rendering structured text.".to_string(),
+                        "Install the published fixtures to hydrate inbox intents, configuration files, and baseline journals.".to_string(),
+                        "Export HI_APP_ROOT before starting the binary so relative paths resolve to the mounted data directory.".to_string(),
                     ],
-                    children: vec![StructuredSection {
-                        heading: "Key Capabilities".to_string(),
-                        body: vec![
-                            "Beat scheduling ensures inbox intents are processed on cadence.".to_string(),
-                            "Agent reasoning is captured with THINK, ACT, and OBSERVE messages for auditability.".to_string(),
-                        ],
-                        children: vec![],
-                    }],
+                    children: vec![
+                        StructuredSection {
+                            heading: "Configuration Files".to_string(),
+                            body: vec![
+                                "config/beat.yml governs cadence, intent thresholds, and retry behaviour.".to_string(),
+                                "config/agent.yml defines the persona prompts and max ReAct turns.".to_string(),
+                            ],
+                            children: vec![StructuredSection {
+                                heading: "LLM Overrides".to_string(),
+                                body: vec![
+                                    "Swap config/llm.yml to the OpenAI profile when a real model is available.".to_string(),
+                                    "Set OPENAI_API_KEY in the environment before launching the orchestrator.".to_string(),
+                                ],
+                                children: vec![],
+                            }],
+                        },
+                        StructuredSection {
+                            heading: "Operator Checklist".to_string(),
+                            body: vec![
+                                "Run cargo run -p hi_telos --bin bootstrap_fixtures -- ./tmp/hi-telos-core.".to_string(),
+                                "Confirm intent inbox entries exist under data/intent/inbox before triggering Beats.".to_string(),
+                                "Open docs/work_acceptance_plan.md to review current delivery scope.".to_string(),
+                            ],
+                            children: vec![],
+                        },
+                    ],
                 },
                 StructuredSection {
-                    heading: "Mock Data".to_string(),
+                    heading: "2 · Heartbeat Execution".to_string(),
                     body: vec![
-                        "Front-end developers can target this endpoint to validate typography, spacing, and nested section rendering without requiring live runs.".to_string(),
+                        "Beats pull intents from inbox, route them through the ReAct loop, and persist artefacts to journals and SP indexes.".to_string(),
+                        "Mock payloads expose THINK/ACT/OBSERVE sections so the UI can preview accordion and timeline styling.".to_string(),
                     ],
-                    children: vec![StructuredSection {
-                        heading: "Sample Checklist".to_string(),
-                        body: vec![
-                            "Confirm summary banners render highlighted callouts.".to_string(),
-                            "Verify numbered steps appear with consistent indentation.".to_string(),
-                            "Ensure code blocks and inline emphasis use the design system tokens.".to_string(),
-                        ],
-                        children: vec![],
-                    }],
+                    children: vec![
+                        StructuredSection {
+                            heading: "Scheduler".to_string(),
+                            body: vec![
+                                "Each beat iteration evaluates queue depth and skips when nothing actionable is present.".to_string(),
+                                "Failed intents are shunted into intent/queue/failed with exponential backoff metadata.".to_string(),
+                            ],
+                            children: vec![],
+                        },
+                        StructuredSection {
+                            heading: "Agent Loop".to_string(),
+                            body: vec![
+                                "The orchestrator emits THINK, ACT, and OBSERVE events, which downstream dashboards render as timeline items.".to_string(),
+                                "Final answers are appended to journals/YYYY/MM/DD.md alongside the originating intent summary.".to_string(),
+                            ],
+                            children: vec![StructuredSection {
+                                heading: "Storage Touchpoints".to_string(),
+                                body: vec![
+                                    "SP index highlights top_used and most_recent resolutions for quick recall.".to_string(),
+                                    "LLM logs capture prompts/responses with metadata (model, run_id) for auditing.".to_string(),
+                                ],
+                                children: vec![],
+                            }],
+                        },
+                        StructuredSection {
+                            heading: "Observability".to_string(),
+                            body: vec![
+                                "/ui/logs streams combined LLM transcripts, SP snapshots, and memory rollups.".to_string(),
+                                "/ui/messages surfaces inbox, queue, and archive slices for a quick health check.".to_string(),
+                            ],
+                            children: vec![],
+                        },
+                    ],
+                },
+                StructuredSection {
+                    heading: "3 · Appendix".to_string(),
+                    body: vec![
+                        "Reference APIs and mock utilities that unblock front-end development without waiting for live traffic.".to_string(),
+                    ],
+                    children: vec![
+                        StructuredSection {
+                            heading: "Mock Endpoints".to_string(),
+                            body: vec![
+                                "GET /api/mock/text_structure returns the latest structured preview payload.".to_string(),
+                                "POST /api/mock/text_structure accepts either a full content object or {\"content\": ..., \"note\": \"...\"}.".to_string(),
+                                "DELETE /api/mock/text_structure clears overrides so the inline Rust payload is served again.".to_string(),
+                            ],
+                            children: vec![StructuredSection {
+                                heading: "History Controls".to_string(),
+                                body: vec![
+                                    "GET /api/mock/text_structure/history?limit=5 lists the most recent persisted drafts.".to_string(),
+                                    "POST /api/mock/text_structure/history/{id}/restore promotes an old draft back to the preview state.".to_string(),
+                                ],
+                                children: vec![],
+                            }],
+                        },
+                        StructuredSection {
+                            heading: "Design Tokens".to_string(),
+                            body: vec![
+                                "Use monospace typography, neon accents, and dashed separators to match the Telos console aesthetic.".to_string(),
+                                "Nested sections should indent with subtle dashed lines rather than bullets for clarity.".to_string(),
+                            ],
+                            children: vec![],
+                        },
+                    ],
                 },
             ],
         }

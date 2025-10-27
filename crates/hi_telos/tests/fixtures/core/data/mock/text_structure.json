@@ -1,41 +1,113 @@
 {
   "content": {
-    "title": "Telos Core Flow",
-    "summary": "Structured walkthrough of the Beat \u2192 ReAct \u2192 Archive pipeline using mock data.",
+    "title": "Telos Operator Handbook",
+    "summary": "Mock content that mirrors a full operator runbook so the UI can exercise typography, metadata badges, and deep nesting.",
     "sections": [
       {
-        "heading": "Inbox Preparation",
+        "heading": "1 \u00b7 Environment Bootstrapping",
         "body": [
-          "Install the baseline fixtures to populate inbox intents and configuration files.",
-          "Confirm environment variables HI_APP_ROOT and HI_SERVER_BIND are exported before starting the server."
+          "Install the published fixtures to hydrate inbox intents, configuration files, and baseline journals.",
+          "Export HI_APP_ROOT before starting the binary so relative paths resolve to the mounted data directory."
         ],
         "children": [
           {
-            "heading": "Checklist",
+            "heading": "Configuration Files",
+            "body": [
+              "config/beat.yml governs cadence, intent thresholds, and retry behaviour.",
+              "config/agent.yml defines the persona prompts and max ReAct turns."
+            ],
+            "children": [
+              {
+                "heading": "LLM Overrides",
+                "body": [
+                  "Swap config/llm.yml to the OpenAI profile when a real model is available.",
+                  "Set OPENAI_API_KEY in the environment before launching the orchestrator."
+                ]
+              }
+            ]
+          },
+          {
+            "heading": "Operator Checklist",
             "body": [
               "Run cargo run -p hi_telos --bin bootstrap_fixtures -- ./tmp/hi-telos-core.",
-              "Inspect data/intent/inbox for the seed markdown intent."
+              "Confirm intent inbox entries exist under data/intent/inbox before triggering Beats.",
+              "Open docs/work_acceptance_plan.md to review current delivery scope."
             ]
           }
         ]
       },
       {
-        "heading": "Processing",
+        "heading": "2 \u00b7 Heartbeat Execution",
         "body": [
-          "Call POST /api/intents to enqueue a new request and trigger Beat scheduling.",
-          "Observe the orchestrator logs for THINK/ACT/OBSERVE traces to mirror the production flow."
+          "Beats pull intents from inbox, route them through the ReAct loop, and persist artefacts to journals and SP indexes.",
+          "Mock payloads expose THINK/ACT/OBSERVE sections so the UI can preview accordion and timeline styling."
         ],
         "children": [
           {
-            "heading": "Outputs",
+            "heading": "Scheduler",
             "body": [
-              "Review data/intent/history for archived intents.",
-              "Open data/journals/YYYY/MM/DD.md to validate rendered reasoning steps."
+              "Each beat iteration evaluates queue depth and skips when nothing actionable is present.",
+              "Failed intents are shunted into intent/queue/failed with exponential backoff metadata."
+            ]
+          },
+          {
+            "heading": "Agent Loop",
+            "body": [
+              "The orchestrator emits THINK, ACT, and OBSERVE events, which downstream dashboards render as timeline items.",
+              "Final answers are appended to journals/YYYY/MM/DD.md alongside the originating intent summary."
+            ],
+            "children": [
+              {
+                "heading": "Storage Touchpoints",
+                "body": [
+                  "SP index highlights top_used and most_recent resolutions for quick recall.",
+                  "LLM logs capture prompts/responses with metadata (model, run_id) for auditing."
+                ]
+              }
+            ]
+          },
+          {
+            "heading": "Observability",
+            "body": [
+              "/ui/logs streams combined LLM transcripts, SP snapshots, and memory rollups.",
+              "/ui/messages surfaces inbox, queue, and archive slices for a quick health check."
+            ]
+          }
+        ]
+      },
+      {
+        "heading": "3 \u00b7 Appendix",
+        "body": [
+          "Reference APIs and mock utilities that unblock front-end development without waiting for live traffic."
+        ],
+        "children": [
+          {
+            "heading": "Mock Endpoints",
+            "body": [
+              "GET /api/mock/text_structure returns the latest structured preview payload.",
+              "POST /api/mock/text_structure accepts either a full content object or {\"content\": ..., \"note\": \"...\"}.",
+              "DELETE /api/mock/text_structure clears overrides so the inline Rust payload is served again."
+            ],
+            "children": [
+              {
+                "heading": "History Controls",
+                "body": [
+                  "GET /api/mock/text_structure/history?limit=5 lists the most recent persisted drafts.",
+                  "POST /api/mock/text_structure/history/{id}/restore promotes an old draft back to the preview state."
+                ]
+              }
+            ]
+          },
+          {
+            "heading": "Design Tokens",
+            "body": [
+              "Use monospace typography, neon accents, and dashed separators to match the Telos console aesthetic.",
+              "Nested sections should indent with subtle dashed lines rather than bullets for clarity."
             ]
           }
         ]
       }
     ]
   },
-  "note": "Seeded Telos preview"
+  "note": "UI preview baseline"
 }

@@ -35,6 +35,7 @@ pub fn router() -> Router<ServerState> {
         .route("/ui/md", get(ui_markdown))
         .route("/ui/md/stream", get(ui_markdown_stream))
         .route("/ui/logs", get(ui_logs))
+        .route("/ui/mock", get(ui_mock_preview))
         .route("/ui/logs/stream", get(ui_logs_stream))
 }
 
@@ -265,6 +266,260 @@ async fn ui_logs() -> Html<String> {
     render_page("HI Telos — Logs", "日志面板", "/ui/logs", &body, script)
 }
 
+async fn ui_mock_preview() -> Html<String> {
+    let body = String::from(
+        r#"<section class=\"span-2\">
+             <div class=\"summary-card\">
+               <div class=\"summary-header\">
+                 <span class=\"badge\" id=\"mock-source\">加载中…</span>
+                 <h2 id=\"mock-title\">Telos Structured Preview</h2>
+                 <p id=\"mock-summary\" class=\"summary-text\">加载中…</p>
+               </div>
+               <div class=\"meta-grid\">
+                 <div>最近更新：<span id=\"mock-updated\">—</span></div>
+                 <div>备注：<span id=\"mock-note\">—</span></div>
+               </div>
+               <div class=\"actions\">
+                 <button type=\"button\" id=\"mock-refresh\" class=\"btn\">手动刷新</button>
+                 <span class=\"hint-inline\">每 15 秒自动刷新</span>
+               </div>
+             </div>
+           </section>
+           <section class=\"span-2\">
+             <h2>层级内容</h2>
+             <ul id=\"mock-sections\" class=\"section-tree\">
+               <li>加载中…</li>
+             </ul>
+           </section>
+           <section>
+             <h2>历史版本（最近 5 条）</h2>
+             <ul id=\"mock-history\" class=\"history-list\">
+               <li>加载中…</li>
+             </ul>
+           </section>
+           <section>
+             <h2>调试提示</h2>
+             <pre class=\"hint\">使用 POST /api/mock/text_structure 推送结构化内容，或 DELETE 恢复默认内置 Mock。</pre>
+           </section>"#,
+    );
+
+    let script = r#"
+(function() {
+  const statusEl = document.getElementById('status');
+  const titleEl = document.getElementById('mock-title');
+  const summaryEl = document.getElementById('mock-summary');
+  const sourceEl = document.getElementById('mock-source');
+  const noteEl = document.getElementById('mock-note');
+  const updatedEl = document.getElementById('mock-updated');
+  const sectionsEl = document.getElementById('mock-sections');
+  const historyEl = document.getElementById('mock-history');
+  const refreshBtn = document.getElementById('mock-refresh');
+  const REFRESH_INTERVAL = 15000;
+  let timerId = null;
+
+  function setStatus(text) {
+    if (statusEl) {
+      statusEl.textContent = text;
+    }
+  }
+
+  function setText(el, text) {
+    if (el) {
+      el.textContent = text;
+    }
+  }
+
+  function clearChildren(node) {
+    if (!node) {
+      return;
+    }
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
+
+  function formatDate(value) {
+    if (!value) {
+      return '—';
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+    return date.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  function mapSource(source) {
+    if (source === 'file') {
+      return '落盘文件（data/mock/text_structure.json）';
+    }
+    return '内置 Mock（Rust 默认）';
+  }
+
+  function createSectionNode(section) {
+    const li = document.createElement('li');
+    li.className = 'section-item';
+
+    const heading = document.createElement('div');
+    heading.className = 'section-heading';
+    heading.textContent = section && section.heading ? section.heading : '未命名';
+    li.appendChild(heading);
+
+    if (section && Array.isArray(section.body) && section.body.length > 0) {
+      const body = document.createElement('div');
+      body.className = 'section-body';
+      section.body.forEach(function(line) {
+        const p = document.createElement('p');
+        p.textContent = line;
+        body.appendChild(p);
+      });
+      li.appendChild(body);
+    }
+
+    if (section && Array.isArray(section.children) && section.children.length > 0) {
+      const nested = document.createElement('ul');
+      nested.className = 'section-tree nested';
+      section.children.forEach(function(child) {
+        nested.appendChild(createSectionNode(child));
+      });
+      li.appendChild(nested);
+    }
+
+    return li;
+  }
+
+  function renderSections(sections) {
+    if (!sectionsEl) {
+      return;
+    }
+    clearChildren(sectionsEl);
+    if (!Array.isArray(sections) || sections.length === 0) {
+      const item = document.createElement('li');
+      item.textContent = '暂无结构化内容';
+      sectionsEl.appendChild(item);
+      return;
+    }
+    sections.forEach(function(section) {
+      sectionsEl.appendChild(createSectionNode(section));
+    });
+  }
+
+  function renderHistory(entries) {
+    if (!historyEl) {
+      return;
+    }
+    clearChildren(historyEl);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      const item = document.createElement('li');
+      item.textContent = '暂无历史记录';
+      historyEl.appendChild(item);
+      return;
+    }
+    entries.forEach(function(entry) {
+      const item = document.createElement('li');
+      item.className = 'history-item';
+
+      const heading = document.createElement('div');
+      heading.className = 'history-heading';
+      const label = entry.note && entry.note.trim().length > 0 ? entry.note : '未备注';
+      heading.textContent = formatDate(entry.saved_at) + ' · ' + label;
+      item.appendChild(heading);
+
+      const detail = document.createElement('div');
+      detail.className = 'history-detail';
+      if (entry.content && entry.content.title) {
+        detail.textContent = entry.content.title;
+      } else if (entry.id) {
+        detail.textContent = entry.id;
+      } else {
+        detail.textContent = '—';
+      }
+      item.appendChild(detail);
+
+      historyEl.appendChild(item);
+    });
+  }
+
+  function renderPreview(preview) {
+    setText(titleEl, preview.title || '结构化 Mock');
+    setText(summaryEl, preview.summary || '—');
+    setText(sourceEl, mapSource(preview.source));
+    setText(noteEl, preview.note || '—');
+    setText(updatedEl, formatDate(preview.updated_at));
+    renderSections(preview.sections || []);
+  }
+
+  function toggleRefresh(disabled) {
+    if (!refreshBtn) {
+      return;
+    }
+    refreshBtn.disabled = disabled;
+    if (disabled) {
+      refreshBtn.classList.add('disabled');
+    } else {
+      refreshBtn.classList.remove('disabled');
+    }
+  }
+
+  function fetchData() {
+    toggleRefresh(true);
+    setStatus('加载中 …');
+    Promise.all([
+      fetch('/api/mock/text_structure').then(function(response) {
+        if (!response.ok) {
+          throw new Error('preview HTTP ' + response.status);
+        }
+        return response.json();
+      }),
+      fetch('/api/mock/text_structure/history?limit=5').then(function(response) {
+        if (!response.ok) {
+          throw new Error('history HTTP ' + response.status);
+        }
+        return response.json();
+      })
+    ])
+      .then(function(results) {
+        const preview = results[0];
+        const history = results[1];
+        renderPreview(preview);
+        renderHistory(history);
+        setStatus('已加载（15 秒自动刷新）');
+      })
+      .catch(function(err) {
+        console.error('加载 Mock 数据失败', err);
+        setStatus('加载失败：' + err.message);
+      })
+      .finally(function() {
+        toggleRefresh(false);
+      });
+  }
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function() {
+      fetchData();
+    });
+  }
+
+  fetchData();
+  timerId = setInterval(fetchData, REFRESH_INTERVAL);
+
+  window.addEventListener('beforeunload', function() {
+    if (timerId) {
+      clearInterval(timerId);
+    }
+  });
+})();
+"#;
+
+    render_page(
+        "HI Telos — Mock Preview",
+        "结构化 Mock 预览",
+        "/ui/mock",
+        &body,
+        script,
+    )
+}
+
 async fn ui_messages_stream(State(state): State<ServerState>) -> impl IntoResponse {
     let mut interval = tokio::time::interval(Duration::from_secs(3));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -324,10 +579,11 @@ fn render_page(
     script: &str,
 ) -> Html<String> {
     let nav = format!(
-        "{} | {} | {}",
+        "{} | {} | {} | {}",
         nav_link("/ui/messages", current, "Messages"),
         nav_link("/ui/md", current, "Markdown"),
         nav_link("/ui/logs", current, "Logs"),
+        nav_link("/ui/mock", current, "Mock Preview"),
     );
 
     let html = format!(
@@ -364,11 +620,20 @@ main {{
   padding: 1rem;
   display: grid;
   gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }}
 section {{
   border: 1px solid #00ff90;
   padding: 1rem;
   background: #050505;
+}}
+section.span-2 {{
+  grid-column: span 2;
+}}
+@media (max-width: 720px) {{
+  section.span-2 {{
+    grid-column: span 1;
+  }}
 }}
 pre {{
   white-space: pre-wrap;
@@ -401,6 +666,115 @@ ul.tree button:hover {{
   padding: 0.5rem;
   background: #000;
   color: #e0ffe0;
+}}
+.summary-card {{
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}}
+.summary-header {{
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}}
+.summary-header h2 {{
+  margin: 0;
+}}
+.summary-text {{
+  margin: 0;
+}}
+.meta-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.5rem 1rem;
+  font-size: 0.9rem;
+  color: #8bffd4;
+}}
+.badge {{
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #00ff90;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+}}
+.actions {{
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}}
+.btn {{
+  background: #00ff90;
+  color: #050505;
+  border: none;
+  padding: 0.35rem 0.75rem;
+  font-family: 'Courier New', monospace;
+  cursor: pointer;
+}}
+.btn.disabled,
+.btn:disabled {{
+  background: #033a2c;
+  color: #7cffd1;
+  cursor: not-allowed;
+}}
+.hint-inline {{
+  font-size: 0.8rem;
+  color: #8bffd4;
+}}
+.section-tree {{
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}}
+.section-tree.nested {{
+  margin-top: 0.5rem;
+  padding-left: 1rem;
+  border-left: 1px dashed #00ff90;
+}}
+.section-item {{
+  border: 1px solid #00ff90;
+  padding: 0.75rem;
+  background: #020902;
+}}
+.section-heading {{
+  font-weight: bold;
+  margin-bottom: 0.5rem;
+}}
+.section-body {{
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}}
+.section-body p {{
+  margin: 0;
+}}
+.history-list {{
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}}
+.history-item {{
+  border: 1px solid #00ff90;
+  padding: 0.75rem;
+  background: #020902;
+}}
+.history-heading {{
+  font-weight: bold;
+  margin-bottom: 0.25rem;
+}}
+.history-detail {{
+  font-size: 0.9rem;
+  color: #8bffd4;
+}}
+.hint {{
+  white-space: pre-wrap;
+  word-break: break-word;
 }}
 </style>
 </head>
