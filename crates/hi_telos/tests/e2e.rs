@@ -200,7 +200,10 @@ async fn text_structure_mock_flow_via_http() -> Result<()> {
         .await?;
     assert_eq!(seeded_preview.title, "E2E Auto Mock");
     assert_eq!(seeded_preview.note.as_deref(), Some("Auto seed via e2e"));
-    assert_eq!(seeded_preview.summary, "Generated in test to drive UI previews");
+    assert_eq!(
+        seeded_preview.summary,
+        "Generated in test to drive UI previews"
+    );
     assert_eq!(seeded_preview.source, "file");
     assert!(
         seeded_preview
@@ -209,14 +212,12 @@ async fn text_structure_mock_flow_via_http() -> Result<()> {
             .map(|section| section.heading.starts_with("Seed Snapshot @"))
             .unwrap_or(false)
     );
-    assert!(
-        seeded_preview.sections.iter().any(|section| {
-            section
-                .body
-                .iter()
-                .any(|line| line.contains("Auto seed via e2e"))
-        })
-    );
+    assert!(seeded_preview.sections.iter().any(|section| {
+        section
+            .body
+            .iter()
+            .any(|line| line.contains("Auto seed via e2e"))
+    }));
 
     let updated_content = StructuredContent {
         title: "E2E Title".to_string(),
@@ -266,10 +267,12 @@ async fn text_structure_mock_flow_via_http() -> Result<()> {
         history.entries[0].note.as_deref(),
         Some("Updated via e2e test")
     );
-    assert!(history
-        .entries
-        .iter()
-        .any(|entry| entry.note.as_deref() == Some("Auto seed via e2e")));
+    assert!(
+        history
+            .entries
+            .iter()
+            .any(|entry| entry.note.as_deref() == Some("Auto seed via e2e"))
+    );
 
     let restore_target = history
         .entries

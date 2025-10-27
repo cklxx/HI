@@ -402,7 +402,8 @@ async fn seed_text_structure_preview(
             heading: format!("Seed Snapshot @ {}", now.format("%H:%M:%S")),
             body: vec![
                 "Automatically generated mock data for the UI preview console.".to_string(),
-                "Use the refresh button to pull additional revisions or restore earlier drafts.".to_string(),
+                "Use the refresh button to pull additional revisions or restore earlier drafts."
+                    .to_string(),
                 format!("Seed note: {intro_note}"),
             ],
             children: vec![],
@@ -2333,16 +2334,21 @@ api_base: {}
             .first()
             .expect("seeded section present");
         assert!(first_section.heading.starts_with("Seed Snapshot @"));
-        assert!(first_section
-            .body
-            .iter()
-            .any(|line| line.contains("Seeded from test")));
+        assert!(
+            first_section
+                .body
+                .iter()
+                .any(|line| line.contains("Seeded from test"))
+        );
 
         let stored = tokio::fs::read_to_string(data_dir.join("mock/text_structure.json"))
             .await
             .expect("read seeded file");
         let stored: serde_json::Value = serde_json::from_str(&stored).expect("parse seeded file");
-        assert_eq!(stored["note"], serde_json::Value::String("Seeded from test".to_string()));
+        assert_eq!(
+            stored["note"],
+            serde_json::Value::String("Seeded from test".to_string())
+        );
 
         let history_response = app
             .clone()
@@ -2355,7 +2361,12 @@ api_base: {}
             .await
             .expect("history response");
         assert_eq!(history_response.status(), StatusCode::OK);
-        let body = history_response.into_body().collect().await.unwrap().to_bytes();
+        let body = history_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
         let history: TextStructureHistoryResponse =
             serde_json::from_slice(&body).expect("parse seeded history");
         assert_eq!(history.entries.len(), 1);

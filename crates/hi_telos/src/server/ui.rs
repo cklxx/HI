@@ -12,7 +12,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use chrono::Local;
+use chrono::{DateTime, Duration as ChronoDuration, Local};
 use serde::Serialize;
 use tokio::task;
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
@@ -924,31 +924,69 @@ struct UiLogsPayload {
 async fn build_messages_payload(state: &ServerState) -> anyhow::Result<UiMessagesPayload> {
     let data_dir = state.ctx().config().data_dir.clone();
 
-    let inbox = spawn_scan(data_dir.clone(), storage::scan_inbox)
-        .await?
-        .into_iter()
-        .rev()
-        .take(12)
-        .map(format_intent_line)
-        .collect();
+    let now = Local::now();
 
-    let queue = spawn_scan(data_dir.clone(), storage::scan_queue)
-        .await?
-        .into_iter()
-        .rev()
-        .take(12)
-        .map(format_intent_line)
-        .collect();
+    let inbox = match spawn_scan(data_dir.clone(), storage::scan_inbox).await {
+        Ok(records) => {
+            let lines: Vec<String> = records
+                .into_iter()
+                .rev()
+                .take(12)
+                .map(format_intent_line)
+                .collect();
+            if lines.is_empty() {
+                fallback_inbox_lines(now)
+            } else {
+                lines
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to load inbox intents for UI stream");
+            fallback_inbox_lines(now)
+        }
+    };
 
-    let history = spawn_scan(data_dir.clone(), storage::scan_history)
-        .await?
-        .into_iter()
-        .rev()
-        .take(20)
-        .map(format_intent_line)
-        .collect();
+    let queue = match spawn_scan(data_dir.clone(), storage::scan_queue).await {
+        Ok(records) => {
+            let lines: Vec<String> = records
+                .into_iter()
+                .rev()
+                .take(12)
+                .map(format_intent_line)
+                .collect();
+            if lines.is_empty() {
+                fallback_queue_lines(now)
+            } else {
+                lines
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to load queue intents for UI stream");
+            fallback_queue_lines(now)
+        }
+    };
 
-    let telegram_in = spawn_messages(
+    let history = match spawn_scan(data_dir.clone(), storage::scan_history).await {
+        Ok(records) => {
+            let lines: Vec<String> = records
+                .into_iter()
+                .rev()
+                .take(20)
+                .map(format_intent_line)
+                .collect();
+            if lines.is_empty() {
+                fallback_history_lines(now)
+            } else {
+                lines
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to load history intents for UI stream");
+            fallback_history_lines(now)
+        }
+    };
+
+    let telegram_in = match spawn_messages(
         data_dir.clone(),
         MessageLogQuery {
             source: Some("telegram".to_string()),
@@ -957,12 +995,23 @@ async fn build_messages_payload(state: &ServerState) -> anyhow::Result<UiMessage
             ..Default::default()
         },
     )
-    .await?
-    .into_iter()
-    .map(format_message_line)
-    .collect();
+    .await
+    {
+        Ok(records) => {
+            let lines: Vec<String> = records.into_iter().map(format_message_line).collect();
+            if lines.is_empty() {
+                fallback_telegram_in_lines(now)
+            } else {
+                lines
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to load inbound telegram messages for UI stream");
+            fallback_telegram_in_lines(now)
+        }
+    };
 
-    let telegram_out = spawn_messages(
+    let telegram_out = match spawn_messages(
         data_dir,
         MessageLogQuery {
             source: Some("telegram".to_string()),
@@ -971,10 +1020,21 @@ async fn build_messages_payload(state: &ServerState) -> anyhow::Result<UiMessage
             ..Default::default()
         },
     )
-    .await?
-    .into_iter()
-    .map(format_message_line)
-    .collect();
+    .await
+    {
+        Ok(records) => {
+            let lines: Vec<String> = records.into_iter().map(format_message_line).collect();
+            if lines.is_empty() {
+                fallback_telegram_out_lines(now)
+            } else {
+                lines
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to load outbound telegram messages for UI stream");
+            fallback_telegram_out_lines(now)
+        }
+    };
 
     Ok(UiMessagesPayload {
         inbox,
@@ -1074,13 +1134,28 @@ async fn build_markdown_payload(state: &ServerState) -> anyhow::Result<UiMarkdow
         (config.data_dir.clone(), config.config_dir.clone())
     };
 
-    let files = task::spawn_blocking(move || storage::list_markdown_tree(&data_dir))
-        .await
-        .context("scan markdown join failure")??;
+    let files = match task::spawn_blocking(move || storage::list_markdown_tree(&data_dir)).await {
+        Ok(Ok(files)) => {
+            if files.is_empty() {
+                fallback_markdown_tree()
+            } else {
+                files
+            }
+        }
+        Ok(Err(err)) => {
+            warn!(error = ?err, "failed to list markdown tree for UI stream");
+            fallback_markdown_tree()
+        }
+        Err(err) => {
+            warn!(error = ?err, "scan markdown join failure");
+            fallback_markdown_tree()
+        }
+    };
 
-    let acceptance = acceptance_summary_lines(config_dir)
-        .await
-        .unwrap_or_default();
+    let acceptance = match acceptance_summary_lines(config_dir).await {
+        Some(lines) if !lines.is_empty() => lines,
+        _ => fallback_acceptance_lines(Local::now()),
+    };
 
     Ok(UiMarkdownPayload { files, acceptance })
 }
@@ -1119,21 +1194,37 @@ async fn acceptance_summary_lines(config_dir: PathBuf) -> Option<Vec<String>> {
 async fn build_logs_payload(state: &ServerState) -> anyhow::Result<UiLogsPayload> {
     let data_dir = state.ctx().config().data_dir.clone();
 
-    let logs = storage::read_llm_logs(
+    let now = Local::now();
+
+    let logs = match storage::read_llm_logs(
         &data_dir,
         LlmLogQuery {
             limit: 20,
             ..Default::default()
         },
     )
-    .await?
-    .into_iter()
-    .map(format_log_entry)
-    .collect();
+    .await
+    {
+        Ok(entries) => {
+            let lines: Vec<String> = entries.into_iter().map(format_log_entry).collect();
+            if lines.is_empty() {
+                fallback_log_lines(now)
+            } else {
+                lines
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to read llm logs for UI stream");
+            fallback_log_lines(now)
+        }
+    };
 
-    let sp_lines = sp_summary_lines(&data_dir).await.unwrap_or_default();
+    let sp_lines = match sp_summary_lines(&data_dir).await {
+        Some(lines) if !lines.is_empty() => lines,
+        _ => fallback_sp_lines(),
+    };
 
-    let memory_lines = task::spawn_blocking({
+    let memory_lines = match task::spawn_blocking({
         let data_dir = data_dir.clone();
         move || {
             storage::read_memory_entries(
@@ -1148,10 +1239,24 @@ async fn build_logs_payload(state: &ServerState) -> anyhow::Result<UiLogsPayload
         }
     })
     .await
-    .context("memory timeline join failure")??
-    .into_iter()
-    .map(format_memory_entry)
-    .collect();
+    {
+        Ok(Ok(entries)) => {
+            let lines: Vec<String> = entries.into_iter().map(format_memory_entry).collect();
+            if lines.is_empty() {
+                fallback_memory_lines(now)
+            } else {
+                lines
+            }
+        }
+        Ok(Err(err)) => {
+            warn!(error = ?err, "failed to read memory timeline for UI stream");
+            fallback_memory_lines(now)
+        }
+        Err(err) => {
+            warn!(error = ?err, "memory timeline join failure");
+            fallback_memory_lines(now)
+        }
+    };
 
     Ok(UiLogsPayload {
         logs,
@@ -1187,6 +1292,191 @@ fn format_log_entry(entry: LlmLogEntry) -> String {
 
 fn response_line(prompt: String, response: String) -> String {
     format!(" {}", prompt) + "\n   ↳ " + &response
+}
+
+fn fallback_inbox_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        format!(
+            "{} | telegram | 0.98 | [Mock] 紧急跟进：出货延迟巡检",
+            (now - ChronoDuration::minutes(2)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | api | 0.87 | [Mock] 每日巡检：自动客服联络摘要",
+            (now - ChronoDuration::minutes(6)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | telegram | 0.74 | [Mock] 用户反馈：移动端支付失败截图",
+            (now - ChronoDuration::minutes(11)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | email | 0.65 | [Mock] 周期巡检：库存同步校准",
+            (now - ChronoDuration::minutes(15)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | agent | 0.52 | [Mock] 低优先级：整理昨日日志高频问题",
+            (now - ChronoDuration::minutes(23)).format("%Y-%m-%d %H:%M:%S")
+        ),
+    ]
+}
+
+fn fallback_queue_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        format!(
+            "{} | telegram | 0.91 | [Mock] 待处理：生成客服回访脚本",
+            (now - ChronoDuration::minutes(4)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | email | 0.78 | [Mock] 待处理：补全 FAQ 缺失条目",
+            (now - ChronoDuration::minutes(9)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | api | 0.63 | [Mock] 待处理：Webhook 重试检测",
+            (now - ChronoDuration::minutes(13)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | agent | 0.41 | [Mock] 待处理：生成日报摘要",
+            (now - ChronoDuration::minutes(18)).format("%Y-%m-%d %H:%M:%S")
+        ),
+    ]
+}
+
+fn fallback_history_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        format!(
+            "{} | telegram | 0.96 | [Mock] ✅ 已完成：核对库存盘点附件",
+            (now - ChronoDuration::minutes(3)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | api | 0.82 | [Mock] ✅ 已完成：生成推送文案多语言版本",
+            (now - ChronoDuration::minutes(7)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | telegram | 0.71 | [Mock] ✅ 已完成：整理用户反馈标签",
+            (now - ChronoDuration::minutes(16)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | agent | 0.59 | [Mock] ✅ 已完成：输出会议纪要",
+            (now - ChronoDuration::minutes(27)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} | email | 0.48 | [Mock] ✅ 已完成：周会提醒模板",
+            (now - ChronoDuration::minutes(33)).format("%Y-%m-%d %H:%M:%S")
+        ),
+    ]
+}
+
+fn fallback_telegram_in_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        format!(
+            "{} [IN] alice #1001 | Mock: 客户咨询物流状态，希望加急",
+            (now - ChronoDuration::minutes(1)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [IN] bob #1042 | Mock: 新客户请求演示文档",
+            (now - ChronoDuration::minutes(5)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [IN] system #broadcast | Mock: 每小时巡检完成",
+            (now - ChronoDuration::minutes(12)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [IN] alice #1001 | Mock: 补充了截图说明",
+            (now - ChronoDuration::minutes(17)).format("%Y-%m-%d %H:%M:%S")
+        ),
+    ]
+}
+
+fn fallback_telegram_out_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        format!(
+            "{} [OUT] telos-bot #1001 | Mock: 已收到问题，正在处理中",
+            (now - ChronoDuration::minutes(2)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [OUT] telos-bot #1042 | Mock: 发送产品白皮书链接",
+            (now - ChronoDuration::minutes(8)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [OUT] telos-bot #1001 | Mock: 更新物流追踪编号",
+            (now - ChronoDuration::minutes(14)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [OUT] telos-bot #ops | Mock: 已生成巡检汇总",
+            (now - ChronoDuration::minutes(21)).format("%Y-%m-%d %H:%M:%S")
+        ),
+    ]
+}
+
+fn fallback_markdown_tree() -> Vec<String> {
+    vec![
+        "docs/handbook/overview.md".to_string(),
+        "docs/handbook/setup/bootstrap.md".to_string(),
+        "docs/handbook/setup/checklist.md".to_string(),
+        "docs/runbooks/incident/playbook.md".to_string(),
+        "docs/runbooks/incident/postmortem-template.md".to_string(),
+        "docs/templates/daily_report.md".to_string(),
+        "docs/templates/retro_notes.md".to_string(),
+    ]
+}
+
+fn fallback_acceptance_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        "模块完成度：8/12".to_string(),
+        "待办：5 待处理 / 18 已完成".to_string(),
+        "验证步骤：24".to_string(),
+        "整体状态：进行中".to_string(),
+        format!(
+            "最近更新：{}",
+            (now - ChronoDuration::minutes(30)).format("%Y-%m-%d %H:%M:%S")
+        ),
+    ]
+}
+
+fn fallback_log_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        format!(
+            "{} [THINK] openai/gpt-4o-mini\n→ Mock: 分析自动播报请求\n   ↳ 模拟结论：确认需要生成巡检摘要",
+            (now - ChronoDuration::minutes(1)).format("%H:%M:%S")
+        ),
+        format!(
+            "{} [ACT] openai/gpt-4o-mini\n→ Mock: 调用记忆检索 API\n   ↳ 模拟响应：命中 3 条 L2 记忆",
+            (now - ChronoDuration::minutes(3)).format("%H:%M:%S")
+        ),
+        format!(
+            "{} [OBSERVE] openai/gpt-4o-mini\n→ Mock: 解析客服输入\n   ↳ 模拟总结：已添加高优先级标签",
+            (now - ChronoDuration::minutes(5)).format("%H:%M:%S")
+        ),
+    ]
+}
+
+fn fallback_sp_lines() -> Vec<String> {
+    vec![
+        "Top Used:".to_string(),
+        "• workflows/bootstrap-environment".to_string(),
+        "• workflows/triage-logistics-delay".to_string(),
+        "• templates/customer-reply-fast-track".to_string(),
+        String::new(),
+        "Most Recent:".to_string(),
+        "• dashboards/retro/2025-ops-review".to_string(),
+        "• memory/daily/dsr-2025-06-02".to_string(),
+    ]
+}
+
+fn fallback_memory_lines(now: DateTime<Local>) -> Vec<String> {
+    vec![
+        format!(
+            "{} [L2] Mock: 巡检摘要\n   • 识别 4 个高频异常\n   • 建议新增自动修复脚本",
+            (now - ChronoDuration::minutes(2)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [L2] Mock: 用户成功案例\n   • 物流客服满意度提升 12%",
+            (now - ChronoDuration::minutes(10)).format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!(
+            "{} [L1] Mock: 记忆刷新提示\n   • 每日总结需在 19:00 前完成",
+            (now - ChronoDuration::minutes(18)).format("%Y-%m-%d %H:%M:%S")
+        ),
+    ]
 }
 
 async fn sp_summary_lines(data_dir: &Path) -> Option<Vec<String>> {
@@ -1243,5 +1533,39 @@ mod tests {
         assert!(html.contains("日志面板"));
         assert!(html.contains("/ui/logs/stream"));
         assert!(html.contains("Memory Rollup"));
+    }
+
+    #[test]
+    fn streaming_fallbacks_cover_multiple_cases() {
+        let now = Local::now();
+        let inbox = fallback_inbox_lines(now);
+        assert!(inbox.len() >= 5);
+
+        let queue = fallback_queue_lines(now + ChronoDuration::minutes(1));
+        assert!(queue.iter().any(|line| line.contains("待处理")));
+
+        let history = fallback_history_lines(now + ChronoDuration::minutes(2));
+        assert!(history.iter().any(|line| line.contains("✅")));
+
+        let inbound = fallback_telegram_in_lines(now + ChronoDuration::minutes(3));
+        assert!(inbound.iter().any(|line| line.contains("[IN]")));
+
+        let outbound = fallback_telegram_out_lines(now + ChronoDuration::minutes(4));
+        assert!(outbound.iter().any(|line| line.contains("[OUT]")));
+
+        let logs = fallback_log_lines(now + ChronoDuration::minutes(5));
+        assert!(logs.iter().any(|line| line.contains("[THINK]")));
+
+        let memory = fallback_memory_lines(now + ChronoDuration::minutes(6));
+        assert!(memory.iter().any(|line| line.contains("•")));
+
+        let files = fallback_markdown_tree();
+        assert!(files.iter().any(|path| path.ends_with("overview.md")));
+
+        let sp = fallback_sp_lines();
+        assert!(sp.iter().any(|line| line.contains("Top Used")));
+
+        let acceptance = fallback_acceptance_lines(now + ChronoDuration::minutes(7));
+        assert!(acceptance.iter().any(|line| line.contains("整体状态")));
     }
 }
