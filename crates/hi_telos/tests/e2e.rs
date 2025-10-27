@@ -123,6 +123,9 @@ async fn beat_ingests_intent_and_writes_journal() -> Result<()> {
 
 #[derive(Debug, Deserialize)]
 struct TextStructurePreview {
+    summary: String,
+    #[serde(default)]
+    sections: Vec<StructuredSection>,
     title: String,
     source: String,
     note: Option<String>,
@@ -180,7 +183,41 @@ async fn text_structure_mock_flow_via_http() -> Result<()> {
         .json()
         .await?;
     assert_eq!(preview.source, "file");
-    assert_eq!(preview.note.as_deref(), Some("Seeded Telos preview"));
+    assert_eq!(preview.note.as_deref(), Some("UI preview baseline"));
+
+    let seed_payload = json!({
+        "note": "Auto seed via e2e",
+        "label": "E2E Auto Mock",
+        "summary": "Generated in test to drive UI previews",
+    });
+
+    let seeded_preview: TextStructurePreview = client
+        .post(format!("{}/api/mock/text_structure/seed", base_url))
+        .json(&seed_payload)
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(seeded_preview.title, "E2E Auto Mock");
+    assert_eq!(seeded_preview.note.as_deref(), Some("Auto seed via e2e"));
+    assert_eq!(
+        seeded_preview.summary,
+        "Generated in test to drive UI previews"
+    );
+    assert_eq!(seeded_preview.source, "file");
+    assert!(
+        seeded_preview
+            .sections
+            .first()
+            .map(|section| section.heading.starts_with("Seed Snapshot @"))
+            .unwrap_or(false)
+    );
+    assert!(seeded_preview.sections.iter().any(|section| {
+        section
+            .body
+            .iter()
+            .any(|line| line.contains("Auto seed via e2e"))
+    }));
 
     let updated_content = StructuredContent {
         title: "E2E Title".to_string(),
@@ -229,6 +266,12 @@ async fn text_structure_mock_flow_via_http() -> Result<()> {
     assert_eq!(
         history.entries[0].note.as_deref(),
         Some("Updated via e2e test")
+    );
+    assert!(
+        history
+            .entries
+            .iter()
+            .any(|entry| entry.note.as_deref() == Some("Auto seed via e2e"))
     );
 
     let restore_target = history
